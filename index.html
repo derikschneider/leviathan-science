@@ -9,14 +9,50 @@
     <script type="module" src="/src/my-element.ts"></script>
   </head>
   <body>
-<script type="module" src="https://unpkg.com/@splinetool/viewer@1.12.60/build/spline-viewer.js"></script>
-<spline-viewer hint loading-anim-type="spinner-small-dark" url="https://prod.spline.design/1-CXBwJnhzWTX6m4/scene.splinecode"></spline-viewer>
+    <!--
+    <h1 class="title">Leviathan Science</h1>
+    <div class="controls">
+      <label>
+        Weight: <span id="wghtVal"></span>
+        <input id="wght" type="range" min="100" max="900" step="1" value="700">
+      </label>
+
+      <label>
+        Width: <span id="wdthVal"></span>
+        <input id="wdth" type="range" min="75" max="125" step="1" value="110">
+      </label>
+    </div>
+    -->
+    <script type="module" src="https://unpkg.com/@splinetool/viewer@1.12.61/build/spline-viewer.js"></script>
+    <spline-viewer url="https://prod.spline.design/DkodpS8hJ1MwGYSP/scene.splinecode"></spline-viewer>
     <!--
     <my-element>
       <h1>Vite + Lit</h1>
     </my-element>
   -->
+    <script type="module">
+      const root = document.documentElement;
+
+      const wght = document.getElementById("wght");
+      const wdth = document.getElementById("wdth");
+      const wghtVal = document.getElementById("wghtVal");
+      const wdthVal = document.getElementById("wdthVal");
+
+      function apply() {
+        root.style.setProperty("--ls-wght", wght.value);
+        root.style.setProperty("--ls-wdth", wdth.value);
+        wghtVal.textContent = wght.value;
+        wdthVal.textContent = wdth.value;
+        console.log(wght.value, wdth.value);
+      }
+
+      wght.addEventListener("input", apply);
+      wdth.addEventListener("input", apply);
+      
+      apply();
+    </script>
   </body>
+  
 </html>
 <!--
 "Ghost Leviathan" (https://skfb.ly/poSqY) by gavinpgamer1 is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).

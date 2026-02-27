@@ -1,0 +1,15 @@
+@font-face {
+  font-family: "LS Trappist 1";
+  src: url("/src/assets/fonts/trappist-1-web-simple.woff2") format("woff2");
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 700;
+  font-stretch: 75% 175%;
+  font-display: swap;
+}
+
+/* Defaults for your sliders */
+:root{
+  --ls-wght: 700;
+  --ls-wdth: 110; /* variable axis values are usually 75–125-ish */
+}
