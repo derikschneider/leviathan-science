@@ -49,34 +49,22 @@
   .below{position:relative;z-index:1;padding:14vh 8vw 20vh;max-width:760px}
   .below h2{font-size:clamp(22px,3.4vw,34px);margin:0 0 14px}
   .below p{color:var(--muted);line-height:1.7;font-size:16px;margin:0 0 26px}
-  /* The CTA is a real element sitting over the canvas, not paint in the
-     content texture. Painted, it could never be hovered, focused, clicked or
-     read out - there was no element there at all. JS positions it to line up
-     with the printed type above it; see placeCta(). */
+  /* The visible button is PAINTED into the field (content texture), so the
+     ring splits it along hex seams at rest - and hovering raises its region of
+     the height field in the shader, side walls reading as the drop shadow.
+     Same scheme as the reference, which is bitmap under a zoom. This <a> is
+     the invisible hit-region on top: it carries hover, focus, click and the
+     accessible name, and paints nothing. Its font and padding still matter -
+     they size the box the plate is painted into and raised from. */
   .cta{
-    position:absolute;left:50%;transform:translateX(-50%);z-index:3;
+    position:absolute;left:50%;transform:translateX(-50%);z-index:6;
     display:inline-flex;align-items:center;gap:.85em;white-space:nowrap;
     padding:.95em 1.75em;border:0;border-radius:4px;
-    background:var(--cta);color:var(--cta-ink);
+    background:none;color:transparent;
     font-family:inherit;font-weight:600;letter-spacing:.16em;
     text-transform:uppercase;text-decoration:none;cursor:pointer;
-    /* no box-shadow glow: the canvas is opaque right up to the button, so a
-       CSS shadow would be painted straight over. The shader draws it instead. */
-    box-shadow:0 0 0 1px var(--cta-edge);
-    transition:background .26s ease, transform .26s cubic-bezier(.22,.61,.36,1);
   }
-  .cta .arr{transition:transform .26s cubic-bezier(.22,.61,.36,1)}
-  .cta:hover,.cta:focus-visible{
-    background:var(--cta-hot);
-    transform:translateX(-50%) translateY(-2px);
-  }
-  .cta:focus-visible{outline:2px solid var(--cta-ink);outline-offset:3px}
-  .cta:hover .arr,.cta:focus-visible .arr{transform:translateX(5px)}
-  .cta:active{transform:translateX(-50%) translateY(0)}
-  @media (prefers-reduced-motion:reduce){
-    .cta,.cta .arr{transition:none}
-    .cta:hover,.cta:focus-visible{transform:translateX(-50%)}
-  }
+  .cta:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 </style>
 </head>
 <body>
@@ -197,10 +185,36 @@ function drawContent() {
   cctx.fillText('Variable faces drawn for instruments and', cx, cy + size * 1.12);
   cctx.fillText('the documents that outlive them.', cx, cy + size * 1.42);
 
-  // The CTA is NOT painted here any more - it is a real <a> over the canvas,
-  // so it can be hovered, focused, clicked and read out. All this does is line
-  // it up with the type that IS printed.
+  // --- the CTA plate, painted INTO the field -------------------------------
+  // Two buttons, deliberately - and the reference does the same (zoomed in,
+  // its raised state is bitmap with hex facets across the plate). The plate
+  // you SEE always lives in this texture, so the ring splits it at rest; on
+  // hover the shader raises its region of the height field and this paint
+  // rides the slab's top. The <a> never paints - it is the hit-region.
   placeCta(cy, size);
+  syncCtaRect();
+  if (ctaEl && ctaRect.w > 0){
+    const cg = hexToRgb(cssVar('--cta'));
+    cctx.save();
+    cctx.shadowColor = 'rgba(' + Math.round(cg[0]*255) + ',' + Math.round(cg[1]*255)
+                     + ',' + Math.round(cg[2]*255) + ',0.40)';
+    cctx.shadowBlur = CONF.cta.restGlow;
+    cctx.fillStyle = cssVar('--cta');
+    if (cctx.roundRect){ cctx.beginPath();
+      cctx.roundRect(ctaRect.x, ctaRect.y, ctaRect.w, ctaRect.h, CONF.cta.radius);
+      cctx.fill(); }
+    else cctx.fillRect(ctaRect.x, ctaRect.y, ctaRect.w, ctaRect.h);
+    cctx.restore();
+    const lsz = Math.max(12, size * 0.115);
+    cctx.fillStyle = cssVar('--cta-ink');
+    cctx.font = '600 ' + lsz + 'px ' + fam;
+    cctx.letterSpacing = '0.16em';
+    cctx.textBaseline = 'middle';
+    cctx.fillText('VIEW THE SPECIMENS →', cx + lsz * 0.16 * 0.5,
+                  ctaRect.y + ctaRect.h * 0.52);
+    cctx.textBaseline = 'alphabetic';
+    cctx.letterSpacing = '0px';
+  }
 
   contentDirty = true;
 }
@@ -218,9 +232,9 @@ function placeCta(cy, size){
   ctaEl.style.fontSize = Math.max(12, size * 0.115).toFixed(2) + 'px';
 }
 
-/* Read the real box every frame rather than caching it. The label's width
-   depends on the loaded face, and the hover state nudges it 2px - a cached
-   rect would leave the hole misaligned with the button it is cut for. */
+/* Read the real box from layout rather than assuming it. The label's width
+   depends on the loaded face, and the shader needs the true rect - it paints
+   the plate there and raises exactly that region on hover. */
 function syncCtaRect(){
   if (!ctaEl || !heroEl) return;
   const r = ctaEl.getBoundingClientRect(), h = heroEl.getBoundingClientRect();
@@ -402,12 +416,12 @@ uniform float uEdge;          // hex outline width, px
 uniform vec2  uLightPos;      // soft key light, css px
 uniform float uLightR;        // its falloff radius, px
 uniform float uLightGain;
-uniform vec4  uCta;           // the real button: x, y, w, h in css px
-uniform float uCtaR;          // its corner radius
-uniform float uCtaFeather;    // edge softness of the hole, px
-uniform vec3  uCtaGlowCol;    // the button's glow, drawn BY THE SHADER so it
-uniform float uCtaGlowR;      //   falls on the hexes instead of being hidden
-uniform float uCtaHot;        //   behind an opaque canvas. 0..1 on hover.
+uniform vec4  uCta;           // the CTA plate: x, y, w, h in css px
+uniform float uCtaR;          // its corner radius, px
+uniform float uCtaLift;       // how high its slab rises on hover, cell units
+uniform float uCtaHot;        // 0..1 hover
+uniform vec3  uCtaGlowCol;
+uniform float uCtaGlowR;
 uniform float uBob;           // idle bob amplitude
 uniform float uGap;           // seam width, in cell units
 uniform vec3  uTileCol;
@@ -451,8 +465,18 @@ float ringAt(vec2 centre){
   return min(up, dn) * uPress;
 }
 
-/* height of the tile whose cell contains p */
-float heightAt(vec2 p, out vec2 centre, out float ring){
+float sdRoundRect(vec2 p, vec2 hs, float r){
+  vec2 q = abs(p) - (hs - r);
+  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+/* Height of the surface whose footprint contains p. Usually a hex tile - but
+   on hover the CTA's region is ALSO a surface: one rigid rounded-rect slab
+   rising out of the floor. The plate painted into the content texture rides
+   its top, and its side walls are what read as the reference's offset
+   "shadow". cta returns that slab's height (0 elsewhere) so the caller can
+   tell whose surface the ray hit. */
+float heightAt(vec2 p, out vec2 centre, out float ring, out float cta){
   centre = hexCentre(p);
   ring = ringAt(centre);
   // Breathing is a smooth wave ACROSS the lattice, not a random phase per cell.
@@ -460,7 +484,15 @@ float heightAt(vec2 p, out vec2 centre, out float ring){
   // printed wordmark into per-tile shards.
   float bob = uBob * sin(uTime * 0.55 + centre.x * 0.42 + centre.y * 0.31)
                    * cos(uTime * 0.37 - centre.x * 0.19 + centre.y * 0.27);
-  return (uLift + bob) * ring;      // the resting floor is dead flat and still
+  float hexH = (uLift + bob) * ring;
+
+  cta = 0.0;
+  if (uCtaHot > 0.001 && uCta.z > 0.5){
+    vec2 hs = uCta.zw * 0.5 / uCell;
+    float sd = sdRoundRect(p - (uCta.xy / uCell + hs), hs, uCtaR / uCell);
+    if (sd < 0.0) cta = uCtaLift * uCtaHot;   // the slab does not bob - it is UI
+  }
+  return max(hexH, cta);      // the resting floor is dead flat and still
 }
 
 vec4 contentAt(vec2 p){
@@ -471,30 +503,30 @@ vec4 contentAt(vec2 p){
   return texture(uContent, uv);
 }
 
-float sdRoundRect(vec2 p, vec2 h, float r){
-  vec2 q = abs(p) - (h - r);
-  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
-}
-
 /* soft area-ish key light. Gaussian falloff, so there is no rim to it. */
 float lightAt(vec2 fragPx){
   float d = length(fragPx - uLightPos) / uLightR;
   return exp(-d * d * 1.15);
 }
 
-vec3 render(vec2 frag, out float outline){
-  outline = 0.0;
+vec3 render(vec2 frag){
   vec2 w = frag / uCell;                     // cell units; see contentAt for the
                                              // plane that maps 1:1 to screen
   vec2 centreW = (uRes * 0.5) / uCell;
-  vec2 shear = uTiltDir + (w - centreW) * uPersp;
+  /* Perspective fan. MINUS, not plus: the rays all leave one camera above the
+     screen CENTRE, so at height they sit closer to the centre and column tops
+     lean OUTWARD on screen - and you see the wall each column turns toward the
+     centre. With the sign the other way, every column showed its far, outer
+     wall instead: rays converging as they descend, a camera that cannot exist.
+     That inverted look is exactly what got reported. */
+  vec2 shear = uTiltDir - (w - centreW) * uPersp;
 
-  float maxH   = uLift + uBob + 0.02;
+  float maxH   = max(uLift, uCtaLift * uCtaHot) + uBob + 0.02;
   float floorZ = -0.05;
   const int STEPS = 72;   // thin sliver walls band badly if this is coarse
   float dz = (maxH - floorZ) / float(STEPS);
 
-  bool  hit = false, top = false;
+  bool  hit = false, top = false, hitCta = false;
   vec2  hitXY = w, hitC = vec2(0.0);
   float hitZ = 0.0, hitR = 0.0, hitH = 0.0;
 
@@ -503,18 +535,19 @@ vec3 render(vec2 frag, out float outline){
   // under one cell - so it passes through at most two cells, and sampling both
   // endpoints bounds every height in between. Over the flat floor that is most
   // of the screen this collapses to a couple of iterations.
-  vec2 cA, cB; float rA, rB;
-  float hA = heightAt(w, cA, rA);
-  float hB = heightAt(w + shear * maxH, cB, rB);
+  vec2 cA, cB; float rA, rB, qA, qB;
+  float hA = heightAt(w, cA, rA, qA);
+  float hB = heightAt(w + shear * maxH, cB, rB, qB);
   float z  = min(maxH, max(hA, hB) + dz * 3.0);
 
   for (int i = 0; i < STEPS; i++){
     if (z < floorZ) break;
     vec2 xy = w + shear * z;
-    vec2 c; float rng;
-    float h = heightAt(xy, c, rng);
+    vec2 c; float rng, ctaH;
+    float h = heightAt(xy, c, rng, ctaH);
     if (z <= h){
       hit = true; hitXY = xy; hitC = c; hitZ = z; hitR = rng; hitH = h;
+      hitCta = ctaH > 0.0 && ctaH >= h - 1e-4;
       // landed roughly on the surface -> top face; dropped well under a taller
       // neighbour's roof -> we walked into that neighbour's side wall
       top = (h - z) < dz * 1.6;
@@ -533,14 +566,18 @@ vec3 render(vec2 frag, out float outline){
   float lamp = 1.0 + uLightGain * (L - 0.30);
 
   // -- seam / floor --------------------------------------------------------
-  if (!hit || d > hw){
+  if (!hit || (d > hw && !hitCta)){    // hex gaps do not cut into the slab
     float e = smoothstep(hw, hw + 0.004, d);
-    outline = 1.0;                                // the seam IS a lattice line
     return mix(uSeamCol, uBgCol * 0.85 + uSeamCol * 0.15, e * 0.6) * lamp;
   }
 
   // -- side wall of a raised tile ------------------------------------------
   if (!top){
+    if (hitCta){
+      // the slab's own side: a flat dark face, which is exactly what reads as
+      // the reference's offset "shadow" under the raised button
+      return mix(uSeamCol * 0.40, uTileCol, 0.10) * mix(1.0, lamp, 0.25);
+    }
     vec2 n0 = vec2(1.0, 0.0), n1 = vec2(0.5, S3H), n2 = vec2(-0.5, S3H);
     float a0 = abs(local.x), a1 = abs(dot(local, n1)), a2 = abs(dot(local, n2));
     vec2 nrm = (a0 > a1 && a0 > a2) ? n0 : (a1 > a2 ? n1 : n2);
@@ -551,9 +588,6 @@ vec3 render(vec2 frag, out float outline){
     float depth   = clamp((hitH - hitZ) / max(uLift, 0.001), 0.0, 1.0);
     vec3 wall = mix(uSeamCol * 0.45, uTileCol, 0.06 + 0.40 * facing);
     wall = mix(wall, uSeamCol * 0.45, depth * 0.55);
-    outline = 0.0;                                // a wall is solid, not a line:
-                                                  // over the button it is hidden,
-                                                  // so ridges pass BEHIND it
     return wall * mix(1.0, lamp, 0.30);   // walls barely take the key light
   }
 
@@ -572,7 +606,6 @@ vec3 render(vec2 frag, out float outline){
   // lattice, so the visible honeycomb line has to be its own thing.
   float edge = 1.0 - smoothstep(0.0, uEdge / uCell, hw - d);
   face = mix(face, uSeamCol, edge * 0.55);
-  outline = max(edge * 0.55, c.a);                // outline, plus any printed ink
 
   // A raised tile should read as raised through its WALL, not through a colour
   // shift on its lid - the reference keeps every lid the same value and lets
@@ -580,39 +613,22 @@ vec3 render(vec2 frag, out float outline){
   float r = clamp(hitH / max(uLift, 0.001), 0.0, 1.0);
   face += uAccent * r * 0.02 * (1.0 - c.a * 0.6);
   face *= 0.985 + 0.03 * r;
+  if (hitCta) face *= 1.0 + 0.08 * uCtaHot;       // the raised plate runs a touch hot
 
   return face * lamp;
 }
 
 void main(){
   vec2 frag = vec2(vUv.x, 1.0 - vUv.y) * uRes;
-  float outline = 0.0;
-  vec3 c = render(frag, outline);            // AA is from the supersampled buffer
+  vec3 c = render(frag);          // AA comes from the supersampled backbuffer
 
-  float A = 1.0;
-  vec3 src = c;
-
-  if (uCta.z > 0.5){
+  // hover glow, laid onto the hexes AROUND the raised plate
+  if (uCtaHot > 0.001 && uCta.z > 0.5){
     vec2  hs = uCta.zw * 0.5;
     float sd = sdRoundRect(frag - (uCta.xy + hs), hs, uCtaR);
-
-    /* The button is a PLATE ON the field, never buried by it. Inside its box the
-       canvas keeps only the etched outlines and drops every fill and wall, so a
-       passing ridge goes behind the button instead of swallowing it. Letting
-       lifted tiles stay opaque here is exactly what hid it before. */
-    float inCta = 1.0 - smoothstep(0.0, uCtaFeather, sd);
-    A   = mix(1.0, outline, inCta);
-    src = mix(c, uSeamCol, inCta);
-
-    /* Its glow is drawn HERE rather than as a CSS box-shadow. The canvas is
-       opaque right up to the button, so a CSS shadow would be painted over and
-       never seen; drawn in the shader it lands on the hexes, which is the whole
-       point of a glow. */
-    float g = exp(-max(sd, 0.0) / max(uCtaGlowR, 1.0));
-    src += uCtaGlowCol * g * (0.30 + 0.70 * uCtaHot) * (1.0 - inCta);
+    if (sd > 0.0) c += uCtaGlowCol * exp(-sd / max(uCtaGlowR, 1.0)) * uCtaHot;
   }
-
-  outColor = vec4(src * A, A);            // premultiplied
+  outColor = vec4(c, 1.0);
 }`;
 
 let prog, U = {}, texContent;
@@ -688,29 +704,27 @@ const CONF = {
   across:  12,     // hexes across the viewport width (flat-to-flat)
   cellMin: 74, cellMax: 300,   // must clear across-derived size or it clamps
 
-  tiltDeg: 8,      // camera lean off vertical. 8 deg = 82 deg up off the floor.
+  tiltDeg: 12,     // camera lean off vertical
   tiltAz:  90,     // which way it leans: 90 = down the screen
-  persp:   0.010,
+  persp:   0.038,  // THE perspective dial: how hard column tops fan outward
+                   //   from the screen centre. The shader applies the sign -
+                   //   see the note at `shear` about which walls you must see.
 
   // Elevation is stated as the SIDE WALL HEIGHT IN PX, because that is what
   // you actually see and judge. Stated in cell units instead, it would silently
   // change every time the hex size does - screen wall = lift * tan(tilt) * cell.
   liftPx:  26,     // was 33px at the previous size
   bob:     0.020,
-  gapPx:   0.05,   // physical separation between tiles
-  edgePx:  0.20,   // drawn honeycomb outline - see the note in the shader
+  gapPx:   0.065,  // physical separation between tiles
+  edgePx:  0.27,   // drawn honeycomb outline - see the note in the shader
   ink:     0.45,   // how far up the slab the wordmark is printed
 
   // ring profile, as fractions of viewport width, measured out from the cursor
-  r0:      0.08,   // flat plateau around the cursor. Pulled well in from 0.20
-                   //   so the inner flank has room to start further inward.
-  rise:    0.18,   // the INNER flank. At 0.06 the whole climb fell inside 0.7 of
-                   //   one hex, so tiles jumped 0 -> 0.22 -> 0.97 between rings
-                   //   and the inner edge read as a wall. At 0.18 it spans ~2.2
-                   //   hexes and four rings share the climb. Crest position is
-                   //   unchanged: r0 + rise is still 0.26.
-  hold:    0.0425, // crest
-  fall:    0.12,
+  r0:      0.15,   // flat plateau around the cursor - the inner flat surface
+  rise:    0.12,   // inner flank: ~1.4 hexes share the climb. Gentler than the
+                   //   0.06 wall era, a touch sharper than 0.18 - deliberate.
+  hold:    0.05,   // crest
+  fall:    0.13,
 
   // How the ring chases the cursor - see the long note above stepPointer.
   // These are three genuinely independent dials; they were one spring and
@@ -731,9 +745,10 @@ const CONF = {
   lightR:  0.62, lightGain: 0.40,
 
   // the hole the hex field leaves for the real CTA element underneath
-  // the button's plate on the field: a tight hole, and a glow the shader
-  // paints onto the surrounding hexes
-  cta: { radius: 4, feather: 1.5, glowR: 46, glowGain: 0.55 }
+  // the CTA: painted into the field at rest; on hover its region of the
+  // height field rises liftPx like a slab (the side walls ARE the shadow),
+  // with a glow laid onto the hexes around it
+  cta: { radius: 4, liftPx: 22, restGlow: 16, glowR: 46, glowGain: 0.55 }
 };
 
 let lastMs = 0;
@@ -774,12 +789,12 @@ function frameGL(ms){
   gl.uniform1f(U.uLightR, CONF.lightR * CW);
   gl.uniform1f(U.uLightGain, CONF.lightGain);
   syncCtaRect();
-  ctaHot = ease(ctaHot, ctaWant, 7, dt);
+  ctaHot = ease(ctaHot, ctaWant, 9, dt);
   gl.uniform4f(U.uCta, ctaRect.x, ctaRect.y, ctaRect.w, ctaRect.h);
   gl.uniform1f(U.uCtaR, CONF.cta.radius);
-  gl.uniform1f(U.uCtaFeather, CONF.cta.feather);
-  gl.uniform1f(U.uCtaGlowR, CONF.cta.glowR);
+  gl.uniform1f(U.uCtaLift, CONF.cta.liftPx / Math.max(tilt * cell, 1e-3));
   gl.uniform1f(U.uCtaHot, ctaHot);
+  gl.uniform1f(U.uCtaGlowR, CONF.cta.glowR);
 
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   requestAnimationFrame(frameGL);
