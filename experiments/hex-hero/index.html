@@ -231,22 +231,49 @@ function drawContent() {
   contentDirty = true;
 }
 
-/* === 3. cursor - damped, so the dish glides instead of snapping ========== */
+/* === 3. cursor - damped, so the ring glides instead of snapping ========= */
 const pointer = {
   tx: 0, ty: 0,     // where the cursor actually is
-  x: 0,  y: 0,      // where the dish currently is (chases tx/ty)
-  press: 0,         // 0 = field flat-out raised, 1 = dish at full depth
+  x: 0,  y: 0,      // where the ring currently is (chases tx/ty)
+  press: 0,         // 0 = floor is dead flat, 1 = ring at full height
   want: 0,
   seen: false
 };
 
-addEventListener('pointermove', e => {
-  pointer.tx = e.clientX; pointer.ty = e.clientY;
-  if (!pointer.seen) { pointer.x = pointer.tx; pointer.y = pointer.ty; pointer.seen = true; }
+function engage(x, y){
+  pointer.tx = x; pointer.ty = y;
+  // If the field is already flat the ring is invisible, so drop it straight
+  // onto the cursor. Easing in from wherever the cursor was last seen would
+  // sweep a ridge across the whole page on re-entry.
+  if (!pointer.seen || pointer.press < 0.06) { pointer.x = x; pointer.y = y; }
+  pointer.seen = true;
   pointer.want = 1;
-}, { passive: true });
-addEventListener('pointerleave', () => { pointer.want = 0; });
-addEventListener('blur',        () => { pointer.want = 0; });
+}
+
+function release(){ pointer.want = 0; }
+
+addEventListener('pointermove', e => engage(e.clientX, e.clientY), { passive: true });
+
+/* Letting go again, which is fiddlier than it looks.
+
+   A cursor leaving the window fires pointerleave at documentElement - and
+   pointerleave DOES NOT BUBBLE, so a window-level listener never sees it. That
+   is why the field used to stay raised forever once the mouse left: the
+   release was wired to window and simply never ran. Bind the leave on the
+   element itself, and keep the bubbling pointerout (relatedTarget null = left
+   the document entirely) as a second, independent path.
+
+   Deliberately NOT here: an idle timeout. "Mouse went missing" and "mouse is
+   being held still" are indistinguishable from a timer, and flattening the
+   field under a stationary cursor would be wrong. */
+document.documentElement.addEventListener('pointerleave', release);
+document.documentElement.addEventListener('mouseleave',   release);
+addEventListener('pointerout', e => { if (!e.relatedTarget) release(); });
+addEventListener('pointercancel', release);
+addEventListener('blur', release);                       // alt-tab, devtools
+document.addEventListener('visibilitychange', () => {    // tab switched away
+  if (document.hidden) release();
+});
 
 // frame-rate independent exponential ease: per-second rate, not per-frame
 const ease = (a, b, rate, dt) => a + (b - a) * (1 - Math.exp(-rate * dt));
@@ -258,6 +285,9 @@ function stepPointer(dt){
   pointer.x     = ease(pointer.x,     pointer.tx,   6.5, dt);
   pointer.y     = ease(pointer.y,     pointer.ty,   6.5, dt);
   pointer.press = ease(pointer.press, pointer.want, 2.6, dt);
+  // an exponential only ever approaches its target, so settle the last sliver
+  // and let the floor reach genuinely flat
+  if (pointer.want === 0 && pointer.press < 0.002) pointer.press = 0;
 }
 
 /* === 4. the hex relief shader =========================================== */
