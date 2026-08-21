@@ -1,0 +1,622 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Leviathan Science — Hex Hero</title>
+<style>
+  :root{
+    --bg:#dceae6; --tile:#eef6f4; --seam:#8fb3ac; --text:#04262a;
+    --accent:#0a6f60; --muted:#3d6b66;
+  }
+  :root[data-theme="dark"]{
+    --bg:#04141a; --tile:#0a2a33; --seam:#010a0d; --text:#dcf6f0;
+    --accent:#35e0c0; --muted:#7fb3ae;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg); color:var(--text); overflow-x:hidden;
+    font-family:"LS Trappist 1", ui-sans-serif, system-ui, sans-serif;
+    transition:background .35s ease;
+  }
+  #dots{position:fixed;inset:0;width:100%;height:100%;z-index:0;pointer-events:none}
+  .hero{position:relative;height:100svh;min-height:560px;z-index:1}
+  #hex{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .hero-dom{
+    position:absolute;inset:0;display:none;flex-direction:column;
+    align-items:center;justify-content:center;text-align:center;padding:0 24px;
+  }
+  .no-gl .hero-dom{display:flex}
+  .no-gl #hex{display:none}
+  .brand{
+    position:fixed;top:18px;left:22px;z-index:5;font-size:13px;letter-spacing:.34em;
+    text-transform:uppercase;color:var(--muted);
+  }
+  #themeToggle{
+    position:fixed;top:14px;right:18px;z-index:5;width:38px;height:38px;
+    border:1px solid var(--seam);border-radius:9px;background:transparent;color:var(--text);
+    cursor:pointer;display:grid;place-items:center;font-size:15px;line-height:1;
+  }
+  #themeToggle:hover{border-color:var(--accent);color:var(--accent)}
+  .below{position:relative;z-index:1;padding:14vh 8vw 20vh;max-width:760px}
+  .below h2{font-size:clamp(22px,3.4vw,34px);margin:0 0 14px}
+  .below p{color:var(--muted);line-height:1.7;font-size:16px;margin:0 0 26px}
+  .hint{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:5;
+    font-size:11px;letter-spacing:.24em;text-transform:uppercase;color:var(--muted);opacity:.75}
+</style>
+</head>
+<body>
+<canvas id="dots"></canvas>
+<div class="brand">Leviathan&nbsp;Science</div>
+<button id="themeToggle" aria-label="Toggle colour scheme">&#9680;</button>
+
+<section class="hero">
+  <canvas id="hex"></canvas>
+  <div class="hero-dom">
+    <h1 style="font-size:clamp(44px,11vw,150px);margin:0;letter-spacing:.02em">LEVIATHAN</h1>
+    <p style="color:var(--muted)">A type foundry for deep systems.</p>
+  </div>
+</section>
+
+<section class="below">
+  <h2>Type cut for pressure.</h2>
+  <p>Leviathan Science draws variable typefaces for instruments, interfaces and the
+     documents that outlive them. Every family ships with a full width and weight
+     axis, tested at three metres and at three points.</p>
+</section>
+
+<div class="hint">Move the cursor</div>
+
+<script type="module">
+/* ===========================================================================
+   Leviathan Science - hex-relief hero.
+
+   Technique: an orthographic-with-shear height-field raymarch over a flat-top
+   hex lattice. The RAISED REST PLANE maps 1:1 to screen pixels, so a content texture
+   (the wordmark, drawn to an offscreen 2D canvas) lands exactly where the DOM
+   would put it - and any tile that rises samples that texture from a sheared
+   position, which is what makes the type look printed onto the tile faces and
+   ride up with them.
+
+   Rest state is a FLAT FLOOR. The cursor carries a raised RING with it: dead
+   flat under the cursor and for a plateau around it, then a soft hill that
+   rises, holds a crest, and falls back to the floor. Height is evaluated per
+   CELL, not per fragment, so every tile stays a rigid slab.
+
+   The camera is not straight down - it leans uTiltDeg off vertical, which is
+   what turns a column's height into visible screen-space displacement and lets
+   you see a sliver of its side wall.
+   =========================================================================== */
+
+const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const hexToRgb = h => {
+  h = h.replace('#','');
+  if (h.length === 3) h = [...h].map(c => c + c).join('');
+  return [parseInt(h.slice(0,2),16)/255, parseInt(h.slice(2,4),16)/255, parseInt(h.slice(4,6),16)/255];
+};
+
+/* --- the foundry's own variable face ------------------------------------ */
+let fontReady = false;
+(async () => {
+  try {
+    const f = new FontFace('LS Trappist 1', 'url(../../src/assets/fonts/trappist-1-web-simple.woff2)');
+    await f.load();
+    document.fonts.add(f);
+    fontReady = true;
+  } catch (e) { /* fall back to system sans */ }
+  drawContent();
+})();
+
+/* === 1. dot-matrix wave (2D canvas, full page, behind everything) ======== */
+(() => {
+  const cv = document.getElementById('dots'), ctx = cv.getContext('2d');
+  let W = 0, H = 0;
+  const fit = () => {
+    const d = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    cv.width = W * d; cv.height = H * d; ctx.setTransform(d,0,0,d,0,0);
+  };
+  fit(); addEventListener('resize', fit);
+
+  // crest(u,t) -> height of the wave surface at horizontal position u.
+  // Above the crest is empty; below it the dots pack in and fatten with depth.
+  const crest = (u, t) => 0.74
+    + 0.045 * Math.sin(u * 2.3 + t * 0.42)
+    + 0.020 * Math.sin(u * 6.1 - t * 0.71 + 1.3)
+    + 0.011 * Math.sin(u * 13.7 + t * 1.05);
+
+  const STEP = 13, RMAX = 2.2;
+  const frame = ms => {
+    const t = ms / 1000;
+    if (cv.offsetWidth !== W || cv.offsetHeight !== H) fit();
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle = cssVar('--text');
+    ctx.globalAlpha = 0.22;
+    for (let y = STEP/2; y < H; y += STEP) {
+      const v = y / H;
+      for (let x = STEP/2; x < W; x += STEP) {
+        const d = v - crest(x / W, t);
+        if (d < 0) continue;
+        const b = d < 0.006 ? 1 : Math.min(1, 0.32 + d * 3.2);
+        ctx.beginPath(); ctx.arc(x, y, b * RMAX, 0, 6.2832); ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+})();
+
+/* === 2. content texture - the hero, drawn to an offscreen 2D canvas ====== */
+const content = document.createElement('canvas');
+const cctx = content.getContext('2d');
+let contentDirty = true;
+
+function drawContent() {
+  const d = Math.min((devicePixelRatio || 1) * 2, 3);   // 2x supersample - the mark is printed, keep it sharp
+  const W = innerWidth, H = innerHeight;
+  content.width = Math.max(1, Math.round(W * d));
+  content.height = Math.max(1, Math.round(H * d));
+  cctx.setTransform(d,0,0,d,0,0);
+  cctx.clearRect(0,0,W,H);
+
+  const fam = fontReady ? '"LS Trappist 1"' : 'ui-sans-serif, system-ui, sans-serif';
+  const ink = cssVar('--text'), accent = cssVar('--accent'), muted = cssVar('--muted');
+  const cx = W / 2, cy = H / 2;
+
+  // wordmark - sized to the viewport, tracked out letter by letter
+  cctx.textAlign = 'center';
+  cctx.textBaseline = 'alphabetic';
+  cctx.fillStyle = ink;
+  const word = 'LEVIATHAN';
+  const measure = px => {
+    cctx.font = '600 ' + px + 'px ' + fam;
+    const w = [...word].map(ch => cctx.measureText(ch).width);
+    return { w, total: w.reduce((a,b) => a + b, 0) + px * 0.045 * (word.length - 1) };
+  };
+  let size = Math.min(W * 0.115, 150);
+  let m = measure(size);
+  const maxW = W * 0.82;                       // never let the mark touch the edge
+  if (m.total > maxW) { size = Math.max(28, size * maxW / m.total); m = measure(size); }
+  const track = size * 0.045, widths = m.w, total = m.total;
+  let x = cx - total / 2;
+  [...word].forEach((ch, i) => {
+    cctx.fillText(ch, x + widths[i] / 2, cy + size * 0.1);
+    x += widths[i] + track;
+  });
+
+  // rule under the wordmark
+  cctx.strokeStyle = accent; cctx.globalAlpha = 0.55; cctx.lineWidth = 1;
+  cctx.beginPath();
+  cctx.moveTo(cx - total * 0.5, cy + size * 0.38);
+  cctx.lineTo(cx + total * 0.5, cy + size * 0.38);
+  cctx.stroke();
+  cctx.globalAlpha = 1;
+
+  cctx.fillStyle = muted;
+  cctx.font = '500 ' + Math.max(11, size * 0.105) + 'px ' + fam;
+  cctx.letterSpacing = '0.32em';
+  cctx.fillText('SCIENCE   /   TYPE FOUNDRY', cx + size * 0.105 * 0.32 * 0.5, cy + size * 0.72);
+  cctx.letterSpacing = '0px';
+
+  cctx.font = '400 ' + Math.max(13, size * 0.125) + 'px ' + fam;
+  cctx.fillText('Variable faces drawn for instruments and', cx, cy + size * 1.12);
+  cctx.fillText('the documents that outlive them.', cx, cy + size * 1.42);
+
+  // CTA plate - measured from the label, never guessed from the wordmark, or the
+  // type spills out of the plate at some viewport widths (it did).
+  const label = 'VIEW THE SPECIMENS';
+  const lsz  = Math.max(12, size * 0.115);
+  const ltrk = lsz * 0.16;
+  cctx.font = '600 ' + lsz + 'px ' + fam;
+  cctx.letterSpacing = '0.16em';
+  const lw = cctx.measureText(label).width - ltrk;   // Chrome tracks after the last glyph too
+  cctx.letterSpacing = '0px';
+
+  const bw = Math.round(lw + lsz * 3.4), bh = Math.round(lsz * 3.0);
+  const bx = Math.round(cx - bw / 2), by = Math.round(cy + size * 1.78);
+  cctx.fillStyle = accent;
+  if (cctx.roundRect) { cctx.beginPath(); cctx.roundRect(bx, by, bw, bh, 4); cctx.fill(); }
+  else cctx.fillRect(bx, by, bw, bh);
+
+  cctx.fillStyle = cssVar('--bg');
+  cctx.font = '600 ' + lsz + 'px ' + fam;
+  cctx.letterSpacing = '0.16em';
+  cctx.textBaseline = 'middle';
+  cctx.fillText(label, cx + ltrk * 0.5, by + bh * 0.5);
+  cctx.textBaseline = 'alphabetic';
+  cctx.letterSpacing = '0px';
+
+  contentDirty = true;
+}
+
+/* === 3. cursor - damped, so the dish glides instead of snapping ========== */
+const pointer = {
+  tx: 0, ty: 0,     // where the cursor actually is
+  x: 0,  y: 0,      // where the dish currently is (chases tx/ty)
+  press: 0,         // 0 = field flat-out raised, 1 = dish at full depth
+  want: 0,
+  seen: false
+};
+
+addEventListener('pointermove', e => {
+  pointer.tx = e.clientX; pointer.ty = e.clientY;
+  if (!pointer.seen) { pointer.x = pointer.tx; pointer.y = pointer.ty; pointer.seen = true; }
+  pointer.want = 1;
+}, { passive: true });
+addEventListener('pointerleave', () => { pointer.want = 0; });
+addEventListener('blur',        () => { pointer.want = 0; });
+
+// frame-rate independent exponential ease: per-second rate, not per-frame
+const ease = (a, b, rate, dt) => a + (b - a) * (1 - Math.exp(-rate * dt));
+
+function stepPointer(dt){
+  // slow, soft chase. The ring trails the cursor rather than being welded to
+  // it, which is what makes tiles look like they rise and settle rather than
+  // snap. Rates are per-second time constants, not per-frame fractions.
+  pointer.x     = ease(pointer.x,     pointer.tx,   6.5, dt);
+  pointer.y     = ease(pointer.y,     pointer.ty,   6.5, dt);
+  pointer.press = ease(pointer.press, pointer.want, 2.6, dt);
+}
+
+/* === 4. the hex relief shader =========================================== */
+const canvas = document.getElementById('hex');
+const gl = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: true, antialias: false, depth: false });
+if (!gl) document.body.classList.add('no-gl');
+
+const VERT = `#version 300 es
+precision highp float;
+layout(location=0) in vec2 aPos;
+out vec2 vUv;
+void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+const FRAG = `#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 outColor;
+
+uniform sampler2D uContent;   // the hero, in screen space
+uniform vec2  uRes;           // canvas size in css px
+uniform float uCell;          // hex circumradius in css px
+uniform float uTime;
+uniform vec2  uTiltDir;       // screen-space shear per unit of height
+uniform float uPersp;         // extra outward shear away from centre
+uniform float uLift;          // crest height of the ring, in cell units
+uniform vec2  uPointer;       // damped cursor, css px, y down
+uniform float uR0;            // radius of the flat plateau around the cursor, px
+uniform float uRise;          // width of the rising flank, px
+uniform float uHold;          // width of the crest, px
+uniform float uFall;          // width of the falling flank, px
+uniform float uPress;         // 0 = no ring at all, 1 = ring at full height
+uniform float uInk;           // how far up the slab the printed plane sits, 0..1
+uniform float uEdge;          // hex outline width, px
+uniform vec2  uLightPos;      // soft key light, css px
+uniform float uLightR;        // its falloff radius, px
+uniform float uLightGain;
+uniform float uBob;           // idle bob amplitude
+uniform float uGap;           // seam width, in cell units
+uniform vec3  uTileCol;
+uniform vec3  uSeamCol;
+uniform vec3  uAccent;
+uniform vec3  uBgCol;
+
+const float S3H = 0.8660254;
+
+/* flat-top hexagon: vertices at x = +-1, flat faces at y = +-0.866 */
+float hexDist(vec2 p){ p = abs(p); return max(dot(p, vec2(0.5, S3H)), p.x); }
+
+/* centre of the flat-top hex cell containing p, on a (1, sqrt3) two-lattice */
+vec2 hexCentre(vec2 p){
+  const vec2 sz = vec2(1.0, 1.7320508);
+  const vec2 h  = vec2(0.5, 0.8660254);
+  vec2 a = mod(p, sz) - h;
+  vec2 b = mod(p - h, sz) - h;
+  vec2 l = dot(a, a) < dot(b, b) ? a : b;
+  return p - l;
+}
+
+/* quintic smootherstep - zero 1st AND 2nd derivative at both ends. Plain
+   smoothstep still has a curvature kink at the joins, which reads as a faint
+   crease running round the ring; this does not. */
+float smoother(float e0, float e1, float x){
+  float t = clamp((x - e0) / max(e1 - e0, 1e-5), 0.0, 1.0);
+  return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+/* The ring profile, as a function of distance from the cursor:
+
+     0 ......... uR0 ..... +uRise ..... +uHold ..... +uFall .........
+     |<- flat ->|<- up ->|<- crest ->|<-- down -->|<- flat floor ->|
+
+   Flat under the cursor, a hill around it, floor again outside. */
+float ringAt(vec2 centre){
+  float d  = length(centre * uCell - uPointer);
+  float up = smoother(uR0, uR0 + uRise, d);
+  float dn = 1.0 - smoother(uR0 + uRise + uHold, uR0 + uRise + uHold + uFall, d);
+  return min(up, dn) * uPress;
+}
+
+/* height of the tile whose cell contains p */
+float heightAt(vec2 p, out vec2 centre, out float ring){
+  centre = hexCentre(p);
+  ring = ringAt(centre);
+  // Breathing is a smooth wave ACROSS the lattice, not a random phase per cell.
+  // Random phases make every neighbour a different height, which shatters the
+  // printed wordmark into per-tile shards.
+  float bob = uBob * sin(uTime * 0.55 + centre.x * 0.42 + centre.y * 0.31)
+                   * cos(uTime * 0.37 - centre.x * 0.19 + centre.y * 0.27);
+  return (uLift + bob) * ring;      // the resting floor is dead flat and still
+}
+
+vec4 contentAt(vec2 p){
+  // the resting floor IS z=0, so the mark lands exactly where the DOM would
+  // put it and only distorts where the ring actually lifts tiles
+  vec2 uv = p * uCell / uRes;
+  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return vec4(0.0);
+  return texture(uContent, uv);
+}
+
+/* soft area-ish key light. Gaussian falloff, so there is no rim to it. */
+float lightAt(vec2 fragPx){
+  float d = length(fragPx - uLightPos) / uLightR;
+  return exp(-d * d * 1.15);
+}
+
+vec3 render(vec2 frag){
+  vec2 w = frag / uCell;                     // cell units; see contentAt for the
+                                             // plane that maps 1:1 to screen
+  vec2 centreW = (uRes * 0.5) / uCell;
+  vec2 shear = uTiltDir + (w - centreW) * uPersp;
+
+  float maxH   = uLift + uBob + 0.02;
+  float floorZ = -0.05;
+  const int STEPS = 72;   // thin sliver walls band badly if this is coarse
+  float dz = (maxH - floorZ) / float(STEPS);
+
+  bool  hit = false, top = false;
+  vec2  hitXY = w, hitC = vec2(0.0);
+  float hitZ = 0.0, hitR = 0.0, hitH = 0.0;
+
+  // Start the march at the tallest thing the ray can actually reach instead of
+  // always at maxH. The ray only travels shear*maxH cells horizontally - well
+  // under one cell - so it passes through at most two cells, and sampling both
+  // endpoints bounds every height in between. Over the flat floor that is most
+  // of the screen this collapses to a couple of iterations.
+  vec2 cA, cB; float rA, rB;
+  float hA = heightAt(w, cA, rA);
+  float hB = heightAt(w + shear * maxH, cB, rB);
+  float z  = min(maxH, max(hA, hB) + dz * 3.0);
+
+  for (int i = 0; i < STEPS; i++){
+    if (z < floorZ) break;
+    vec2 xy = w + shear * z;
+    vec2 c; float rng;
+    float h = heightAt(xy, c, rng);
+    if (z <= h){
+      hit = true; hitXY = xy; hitC = c; hitZ = z; hitR = rng; hitH = h;
+      // landed roughly on the surface -> top face; dropped well under a taller
+      // neighbour's roof -> we walked into that neighbour's side wall
+      top = (h - z) < dz * 1.6;
+      break;
+    }
+    z -= dz;
+  }
+
+  vec2 local = hitXY - hitC;
+  float hw = 0.5 - uGap * 0.5;
+  float d  = hexDist(local);
+  // Soft key light. Kept as a gentle multiply around 1.0 and deliberately weak
+  // on walls - a straight multiply blows near-white tiles past 1.0 and erases
+  // the very wall contrast that makes a raised tile read as raised.
+  float L    = lightAt(frag);
+  float lamp = 1.0 + uLightGain * (L - 0.30);
+
+  // -- seam / floor --------------------------------------------------------
+  if (!hit || d > hw){
+    float e = smoothstep(hw, hw + 0.004, d);
+    return mix(uSeamCol, uBgCol * 0.85 + uSeamCol * 0.15, e * 0.6) * lamp;
+  }
+
+  // -- side wall of a raised tile ------------------------------------------
+  if (!top){
+    vec2 n0 = vec2(1.0, 0.0), n1 = vec2(0.5, S3H), n2 = vec2(-0.5, S3H);
+    float a0 = abs(local.x), a1 = abs(dot(local, n1)), a2 = abs(dot(local, n2));
+    vec2 nrm = (a0 > a1 && a0 > a2) ? n0 : (a1 > a2 ? n1 : n2);
+    nrm *= sign(dot(local, nrm));
+    // key light is the top-left lamp, so shade the wall by where it faces
+    vec2  toLight = normalize(uLightPos - frag + vec2(0.0, -1e-3));
+    float facing  = 0.5 + 0.5 * dot(nrm, toLight);
+    float depth   = clamp((hitH - hitZ) / max(uLift, 0.001), 0.0, 1.0);
+    vec3 wall = mix(uSeamCol * 0.45, uTileCol, 0.06 + 0.40 * facing);
+    wall = mix(wall, uSeamCol * 0.45, depth * 0.55);
+    return wall * mix(1.0, lamp, 0.30);   // walls barely take the key light
+  }
+
+  // -- top face: the printed surface ---------------------------------------
+  // The type is printed INSIDE the slab at uInk of its height, not on the lid.
+  // On the lid (uInk = 1) the glyph parallax equals the full wall height, so at
+  // any wall thick enough to read as depth the wordmark tears itself apart -
+  // it ate the T of LEVIATHAN. Sinking the ink plane decouples "how solid the
+  // tiles look" from "how much the mark shatters"; they are otherwise the same
+  // number and cannot be traded off against each other.
+  vec4 c = contentAt(w + shear * hitZ * uInk);
+  vec3 face = mix(uTileCol, c.rgb, c.a);
+
+  // hex outline. This is a DRAWN stroke, not the physical gap: at the 0.25px
+  // gap the reference uses, the separation alone is far too fine to read as a
+  // lattice, so the visible honeycomb line has to be its own thing.
+  float edge = 1.0 - smoothstep(0.0, uEdge / uCell, hw - d);
+  face = mix(face, uSeamCol, edge * 0.55);
+
+  // A raised tile should read as raised through its WALL, not through a colour
+  // shift on its lid - the reference keeps every lid the same value and lets
+  // the shadow do the work. Just the faintest accent so it is not inert.
+  float r = clamp(hitH / max(uLift, 0.001), 0.0, 1.0);
+  face += uAccent * r * 0.02 * (1.0 - c.a * 0.6);
+  face *= 0.985 + 0.03 * r;
+
+  return face * lamp;
+}
+
+void main(){
+  vec2 frag = vec2(vUv.x, 1.0 - vUv.y) * uRes;
+  vec3 c = render(frag);          // AA comes from the supersampled backbuffer now
+  // hand the bottom of the hero over to the dot-matrix wave behind us
+  float a = 1.0 - smoothstep(0.70, 0.99, frag.y / uRes.y);
+  outColor = vec4(c * a, a);
+}`;
+
+let prog, U = {}, texContent;
+
+function compile(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+function mkTex(){
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+
+if (gl) {
+  prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) console.error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+  const n = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++){
+    const name = gl.getActiveUniform(prog, i).name;
+    U[name] = gl.getUniformLocation(prog, name);
+  }
+  const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+  const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  texContent = mkTex();
+  gl.uniform1i(U.uContent, 0);
+}
+
+let CW = 0, CH = 0;
+function fitGL(){
+  // supersample: on a 1x display this used to render 1:1 and every hex edge and
+  // printed glyph came back soft. Render 2x and let the browser downfilter.
+  const d = Math.min((devicePixelRatio || 1) * 2, 2.5);
+  CW = canvas.clientWidth; CH = canvas.clientHeight;
+  canvas.width = Math.max(1, Math.round(CW * d));
+  canvas.height = Math.max(1, Math.round(CH * d));
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+
+function pushTheme(){
+  gl.uniform3fv(U.uTileCol, hexToRgb(cssVar('--tile')));
+  gl.uniform3fv(U.uSeamCol, hexToRgb(cssVar('--seam')));
+  gl.uniform3fv(U.uAccent,  hexToRgb(cssVar('--accent')));
+  gl.uniform3fv(U.uBgCol,   hexToRgb(cssVar('--bg')));
+}
+
+const CONF = {
+  // Hex size is held at a constant COUNT across the viewport rather than a fixed
+  // pixel size - a screenshot pins down the ratio, never the px. The reference
+  // measured ~11 across; 6.0 is Derik's tuning up from there, not the reference.
+  across:  6.0,    // hexes across the viewport width
+  cellMin: 74, cellMax: 300,   // must clear across-derived size or it clamps
+
+  tiltDeg: 8,      // camera lean off vertical. 8 deg = 82 deg up off the floor.
+  tiltAz:  90,     // which way it leans: 90 = down the screen
+  persp:   0.010,
+
+  // Elevation is stated as the SIDE WALL HEIGHT IN PX, because that is what
+  // you actually see and judge. Stated in cell units instead, it would silently
+  // change every time the hex size does - screen wall = lift * tan(tilt) * cell.
+  liftPx:  26,     // was 33px at the previous size
+  bob:     0.020,
+  gapPx:   0.05,   // physical separation between tiles
+  edgePx:  0.20,   // drawn honeycomb outline - see the note in the shader
+  ink:     0.45,   // how far up the slab the wordmark is printed
+
+  // ring profile, as fractions of viewport width, measured out from the cursor
+  r0:      0.20,   // flat plateau around the cursor
+  rise:    0.06,   // NB: at across=6 this is ~0.35 of a hex, so the climb lands
+                   //   on one tile and the arc reads as a staircase, not a ridge
+  hold:    0.0425, // crest
+  fall:    0.12,
+
+  lightX:  0.15, lightY: 0.08,   // soft key light, fractions of the viewport
+  lightR:  0.62, lightGain: 0.40
+};
+
+let lastMs = 0;
+function frameGL(ms){
+  if (!gl) return;
+  const dt = Math.min((ms - lastMs) / 1000, 0.05);   // clamp: a backgrounded tab
+  lastMs = ms;                                       // shouldn't teleport the dish
+  if (canvas.clientWidth !== CW || canvas.clientHeight !== CH) { fitGL(); drawContent(); }
+  stepPointer(dt);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texContent);
+  if (contentDirty){
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, content);
+    contentDirty = false;
+  }
+  const cell = Math.min(CONF.cellMax, Math.max(CONF.cellMin, CW / CONF.across / 2));
+  const tilt = Math.tan(CONF.tiltDeg * Math.PI / 180);
+  const az   = CONF.tiltAz * Math.PI / 180;
+
+  gl.uniform2f(U.uRes, CW, CH);
+  gl.uniform1f(U.uCell, cell);
+  gl.uniform1f(U.uTime, ms / 1000);
+  gl.uniform2f(U.uTiltDir, tilt * Math.cos(az), tilt * Math.sin(az));
+  gl.uniform1f(U.uPersp, CONF.persp);
+  gl.uniform1f(U.uLift, CONF.liftPx / Math.max(tilt * cell, 1e-3));
+  gl.uniform2f(U.uPointer, pointer.x, pointer.y);
+  gl.uniform1f(U.uR0,   CONF.r0   * CW);
+  gl.uniform1f(U.uRise, CONF.rise * CW);
+  gl.uniform1f(U.uHold, CONF.hold * CW);
+  gl.uniform1f(U.uFall, CONF.fall * CW);
+  gl.uniform1f(U.uPress, pointer.press);
+  gl.uniform1f(U.uInk, CONF.ink);
+  gl.uniform1f(U.uBob, CONF.bob);
+  gl.uniform1f(U.uGap, CONF.gapPx / cell);
+  gl.uniform1f(U.uEdge, CONF.edgePx);
+  gl.uniform2f(U.uLightPos, CONF.lightX * CW, CONF.lightY * CH);
+  gl.uniform1f(U.uLightR, CONF.lightR * CW);
+  gl.uniform1f(U.uLightGain, CONF.lightGain);
+
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  requestAnimationFrame(frameGL);
+}
+
+/* === 5. theme =========================================================== */
+const root = document.documentElement;
+function applyTheme(t){
+  root.setAttribute('data-theme', t);
+  root.style.colorScheme = t;
+  try { localStorage.setItem('ls-theme', t); } catch (e) {}
+  drawContent();
+  if (gl) pushTheme();
+}
+document.getElementById('themeToggle').addEventListener('click', () =>
+  applyTheme(root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'));
+
+let saved = null;
+try { saved = localStorage.getItem('ls-theme'); } catch (e) {}
+applyTheme(saved || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'));
+
+addEventListener('resize', drawContent);
+if (gl){ fitGL(); pushTheme(); drawContent(); requestAnimationFrame(frameGL); }
+</script>
+</body>
+</html>
