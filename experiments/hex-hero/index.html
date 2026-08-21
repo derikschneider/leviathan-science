@@ -233,9 +233,13 @@ function drawContent() {
 
 /* === 3. cursor - damped, so the ring glides instead of snapping ========= */
 const pointer = {
-  tx: 0, ty: 0,     // where the cursor actually is
-  x: 0,  y: 0,      // where the ring currently is (chases tx/ty)
-  vx: 0, vy: 0,     // and how fast it is moving - the spring carries momentum
+  tx: 0,  ty: 0,    // where the cursor actually is
+  ptx: 0, pty: 0,   // and where it was last frame, to get its velocity
+  cvx: 0, cvy: 0,   // smoothed cursor velocity, px/s
+  cx: 0,  cy: 0,    // the CHASE term - tracks the cursor, never overshoots
+  dx: 0,  dy: 0,    // the DRIFT term - momentum carried past the cursor
+  dvx: 0, dvy: 0,
+  x: 0,   y: 0,     // ring position = chase + drift
   press: 0,         // 0 = floor is dead flat, 1 = ring at full height
   want: 0,
   seen: false
@@ -247,9 +251,13 @@ function engage(x, y){
   // onto the cursor. Easing in from wherever the cursor was last seen would
   // sweep a ridge across the whole page on re-entry.
   if (!pointer.seen || pointer.press < 0.06) {
-    pointer.x = x; pointer.y = y;
-    pointer.vx = 0; pointer.vy = 0;   // teleport must kill momentum too, or the
-  }                                   // ring gets flung on re-entry
+    // teleport must kill momentum and drift too, or the ring gets flung on
+    // re-entry by whatever it happened to be carrying when it left
+    pointer.x = pointer.cx = pointer.ptx = x;
+    pointer.y = pointer.cy = pointer.pty = y;
+    pointer.dx = pointer.dy = pointer.dvx = pointer.dvy = 0;
+    pointer.cvx = pointer.cvy = 0;
+  }
   pointer.seen = true;
   pointer.want = 1;
 }
@@ -280,50 +288,74 @@ document.addEventListener('visibilitychange', () => {    // tab switched away
 });
 
 // frame-rate independent exponential ease: per-second rate, not per-frame.
-// Still used for PRESS (fading the ring in and out), which must never overshoot.
 const ease = (a, b, rate, dt) => a + (b - a) * (1 - Math.exp(-rate * dt));
 
-/* The ring POSITION is a spring, not an ease.
+const smoother = t => { t = Math.min(Math.max(t, 0), 1);
+                        return t * t * t * (t * (t * 6 - 15) + 10); };
 
-   An exponential ease can only ever approach its target - it has no momentum,
-   so it can never drift past the cursor, however it is tuned. Overshoot needs a
-   second-order system, so position is a damped spring and the ring carries
-   velocity: it lags while you move, and when you stop suddenly that velocity
-   carries it past the cursor before it pulls back.
+/* Ring position = CHASE + DRIFT, deliberately two separate terms.
 
-   CONF.follow is stated in the terms you actually judge - how far past it goes,
-   and how long it takes to settle - and the spring constants are derived. For a
-   damped spring the first overshoot fixes the damping ratio outright:
+   This used to be a single damped spring. A spring has one stiffness and one
+   damping ratio, so "catch up quicker" and "come back slower and more gently"
+   are the same dial pulled in opposite directions - you cannot have both. And
+   a linear spring's overshoot is a fixed PERCENTAGE of the distance it had to
+   cover, so it can never be less pronounced at low speed either; it is scale
+   invariant by construction. Three independent asks, one dial. Hence the split:
 
-     zeta  = -ln(o) / sqrt(pi^2 + ln(o)^2)        o = 0.10 -> zeta ~ 0.591
-     omega = 4 / (zeta * settle)                  (4/zeta*w is the 2% settle time)
-     k = omega^2,  c = 2 * zeta * omega
+     CHASE  a quick ease onto the cursor. Never overshoots. CONF.follow.chase
+            is its time constant - lower means tighter, quicker tracking.
 
-   NB the overshoot is a fraction of the distance the ring had left to cover, so
-   it is naturally larger the faster you were moving - which is the "depending on
-   speed" part, and falls out of the physics rather than being special-cased. */
-function springConst(overshoot, settle){
-  const o  = Math.min(Math.max(overshoot, 1e-4), 0.95);
-  const ln = Math.log(o);
-  const z  = -ln / Math.sqrt(Math.PI * Math.PI + ln * ln);
-  const w  = 4 / Math.max(z * settle, 1e-3);
-  return { k: w * w, c: 2 * z * w };
-}
+     DRIFT  an offset along the direction of travel, sized by cursor SPEED.
+            Builds quickly while you move and fades slowly once you stop, and
+            that asymmetry is what carries the ring past the cursor and then
+            walks it back. Being speed-derived and gated, a slow deliberate
+            move barely drifts while a fast flick drifts fully.
 
-function stepPointer(dt){
-  const { k, c } = springConst(CONF.follow.overshoot, CONF.follow.settle);
-  // Substep at a fixed ceiling. An explicit spring integrated at whatever the
-  // frame length happens to be changes its feel with frame rate, and can go
-  // unstable outright on a slow frame.
+   Drift is a CRITICALLY DAMPED spring, not an exponential decay. An exponential
+   leaves at its maximum speed the instant you stop, which reads as a yank;
+   critically damped starts and ends at zero velocity - gentle at both ends -
+   and cannot bounce a second time. */
+function stepPointer(dt, viewW){
+  const F = CONF.follow;
+
+  // cursor velocity, smoothed. Raw per-frame deltas are far too spiky to gate on.
+  const iv = 1 / Math.max(dt, 1e-4);
+  pointer.cvx = ease(pointer.cvx, (pointer.tx - pointer.ptx) * iv, 20, dt);
+  pointer.cvy = ease(pointer.cvy, (pointer.ty - pointer.pty) * iv, 20, dt);
+  pointer.ptx = pointer.tx; pointer.pty = pointer.ty;
+
+  const speed = Math.hypot(pointer.cvx, pointer.cvy);
+
+  // Speed gate. Below speedFloor there is NO drift at all, and it arrives on a
+  // smootherstep rather than linearly, so the effect stays out of the way of
+  // slow deliberate movement instead of merely scaling down in proportion.
+  const gate = smoother((speed - F.speedFloor) / Math.max(F.speedFull - F.speedFloor, 1));
+
+  const want = Math.min(speed * F.lead, F.driftMax * viewW) * gate;
+  const u = speed > 1e-3 ? want / speed : 0;
+  const wantX = pointer.cvx * u, wantY = pointer.cvy * u;
+
+  // builds fast, fades slow - that asymmetry IS the effect
+  const growing = Math.hypot(wantX, wantY) > Math.hypot(pointer.dx, pointer.dy);
+  const w  = 4 / Math.max(growing ? F.buildUp : F.snapback, 1e-3);
+  const ks = w * w, cs = 2 * w;                    // zeta = 1, so no second bounce
+
   let t = dt;
-  while (t > 1e-6){
-    const h = Math.min(t, 1 / 240);
-    t -= h;
-    pointer.vx += (k * (pointer.tx - pointer.x) - c * pointer.vx) * h;
-    pointer.vy += (k * (pointer.ty - pointer.y) - c * pointer.vy) * h;
-    pointer.x  += pointer.vx * h;
-    pointer.y  += pointer.vy * h;
+  while (t > 1e-6){                                // fixed substep: a spring
+    const h = Math.min(t, 1 / 240);                // stepped at whatever the
+    t -= h;                                        // frame length happens to be
+    pointer.dvx += (ks * (wantX - pointer.dx) - cs * pointer.dvx) * h;
+    pointer.dvy += (ks * (wantY - pointer.dy) - cs * pointer.dvy) * h;
+    pointer.dx  += pointer.dvx * h;                // changes feel with fps
+    pointer.dy  += pointer.dvy * h;
   }
+
+  const cr = 1 / Math.max(F.chase, 1e-3);
+  pointer.cx = ease(pointer.cx, pointer.tx, cr, dt);
+  pointer.cy = ease(pointer.cy, pointer.ty, cr, dt);
+
+  pointer.x = pointer.cx + pointer.dx;
+  pointer.y = pointer.cy + pointer.dy;
 
   pointer.press = ease(pointer.press, pointer.want, 2.6, dt);
   // an exponential only ever approaches its target, so settle the last sliver
@@ -624,9 +656,20 @@ const CONF = {
   hold:    0.0425, // crest
   fall:    0.12,
 
-  // how the ring chases the cursor - see the spring note above stepPointer
-  follow:  { overshoot: 0.10,   // drifts 10% past the cursor when you stop dead
-             settle:    1.0 },  // seconds to come back and rest on it
+  // How the ring chases the cursor - see the long note above stepPointer.
+  // These are three genuinely independent dials; they were one spring and
+  // therefore could not be.
+  follow: {
+    chase:      0.07,   // s - follow lag. Lower = tighter, quicker tracking.
+    lead:       0.060,  // s - drift = cursor speed x this, i.e. how far ahead
+                        //     of itself momentum throws the ring
+    driftMax:   0.055,  // hard cap on drift, as a fraction of viewport width
+    buildUp:    0.13,   // s - drift builds this fast while you are moving
+    snapback:   1.80,   // s - and fades this slowly once you stop. Higher =
+                        //     gentler, lazier return onto the cursor.
+    speedFloor: 400,    // px/s - below this there is NO drift at all
+    speedFull:  2200    // px/s - at and above this, drift is at full strength
+  },
 
   lightX:  0.15, lightY: 0.08,   // soft key light, fractions of the viewport
   lightR:  0.62, lightGain: 0.40
@@ -638,7 +681,7 @@ function frameGL(ms){
   const dt = Math.min((ms - lastMs) / 1000, 0.05);   // clamp: a backgrounded tab
   lastMs = ms;                                       // shouldn't teleport the dish
   if (canvas.clientWidth !== CW || canvas.clientHeight !== CH) { fitGL(); drawContent(); }
-  stepPointer(dt);
+  stepPointer(dt, CW);
 
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, texContent);
