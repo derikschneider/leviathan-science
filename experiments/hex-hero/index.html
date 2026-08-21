@@ -8,10 +8,14 @@
   :root{
     --bg:#dceae6; --tile:#eef6f4; --seam:#8fb3ac; --text:#04262a;
     --accent:#0a6f60; --muted:#3d6b66;
+    --cta:#0f9a83; --cta-hot:#14b89c; --cta-ink:#f4fdfb;
+    --cta-edge:rgba(4,38,42,.14); --cta-glow:rgba(16,170,142,.34);
   }
   :root[data-theme="dark"]{
     --bg:#04141a; --tile:#0a2a33; --seam:#010a0d; --text:#dcf6f0;
     --accent:#35e0c0; --muted:#7fb3ae;
+    --cta:#3df0ce; --cta-hot:#6dffe0; --cta-ink:#03171c;
+    --cta-edge:rgba(61,240,206,.55); --cta-glow:rgba(61,240,206,.42);
   }
   *{box-sizing:border-box}
   html,body{margin:0;height:100%}
@@ -20,9 +24,12 @@
     font-family:"LS Trappist 1", ui-sans-serif, system-ui, sans-serif;
     transition:background .35s ease;
   }
-  #dots{position:fixed;inset:0;width:100%;height:100%;z-index:0;pointer-events:none}
   .hero{position:relative;height:100svh;min-height:560px;z-index:1}
-  #hex{position:absolute;inset:0;width:100%;height:100%;display:block}
+  /* The canvas sits ABOVE the CTA so the lattice draws over it, and is
+     transparent to hit-testing so hover/click/focus still reach the button
+     underneath. The shader punches a hole for the button - see uCta. */
+  #hex{position:absolute;inset:0;width:100%;height:100%;display:block;
+       z-index:5;pointer-events:none}
   .hero-dom{
     position:absolute;inset:0;display:none;flex-direction:column;
     align-items:center;justify-content:center;text-align:center;padding:0 24px;
@@ -42,12 +49,41 @@
   .below{position:relative;z-index:1;padding:14vh 8vw 20vh;max-width:760px}
   .below h2{font-size:clamp(22px,3.4vw,34px);margin:0 0 14px}
   .below p{color:var(--muted);line-height:1.7;font-size:16px;margin:0 0 26px}
-  .hint{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:5;
-    font-size:11px;letter-spacing:.24em;text-transform:uppercase;color:var(--muted);opacity:.75}
+  /* The CTA is a real element sitting over the canvas, not paint in the
+     content texture. Painted, it could never be hovered, focused, clicked or
+     read out - there was no element there at all. JS positions it to line up
+     with the printed type above it; see placeCta(). */
+  .cta{
+    position:absolute;left:50%;transform:translateX(-50%);z-index:3;
+    display:inline-flex;align-items:center;gap:.85em;white-space:nowrap;
+    padding:.95em 1.75em;border:0;border-radius:4px;
+    background:var(--cta);color:var(--cta-ink);
+    font-family:inherit;font-weight:600;letter-spacing:.16em;
+    text-transform:uppercase;text-decoration:none;cursor:pointer;
+    box-shadow:0 0 0 1px var(--cta-edge),
+               0 0 20px 1px var(--cta-glow),
+               0 0 56px 6px var(--cta-glow);
+    transition:background .26s ease, transform .26s cubic-bezier(.22,.61,.36,1),
+               box-shadow .26s cubic-bezier(.22,.61,.36,1);
+  }
+  .cta .arr{transition:transform .26s cubic-bezier(.22,.61,.36,1)}
+  .cta:hover,.cta:focus-visible{
+    background:var(--cta-hot);
+    transform:translateX(-50%) translateY(-2px);
+    box-shadow:0 0 0 1px var(--cta-edge),
+               0 0 28px 3px var(--cta-glow),
+               0 0 84px 14px var(--cta-glow);
+  }
+  .cta:focus-visible{outline:2px solid var(--cta-ink);outline-offset:3px}
+  .cta:hover .arr,.cta:focus-visible .arr{transform:translateX(5px)}
+  .cta:active{transform:translateX(-50%) translateY(0)}
+  @media (prefers-reduced-motion:reduce){
+    .cta,.cta .arr{transition:none}
+    .cta:hover,.cta:focus-visible{transform:translateX(-50%)}
+  }
 </style>
 </head>
 <body>
-<canvas id="dots"></canvas>
 <div class="brand">Leviathan&nbsp;Science</div>
 <button id="themeToggle" aria-label="Toggle colour scheme">&#9680;</button>
 
@@ -57,16 +93,17 @@
     <h1 style="font-size:clamp(44px,11vw,150px);margin:0;letter-spacing:.02em">LEVIATHAN</h1>
     <p style="color:var(--muted)">A type foundry for deep systems.</p>
   </div>
+  <a class="cta" id="cta" href="#specimens">
+    View the specimens <span class="arr" aria-hidden="true">&#8594;</span>
+  </a>
 </section>
 
-<section class="below">
+<section class="below" id="specimens">
   <h2>Type cut for pressure.</h2>
   <p>Leviathan Science draws variable typefaces for instruments, interfaces and the
      documents that outlive them. Every family ships with a full width and weight
      axis, tested at three metres and at three points.</p>
 </section>
-
-<div class="hint">Move the cursor</div>
 
 <script type="module">
 /* ===========================================================================
@@ -106,46 +143,6 @@ let fontReady = false;
     fontReady = true;
   } catch (e) { /* fall back to system sans */ }
   drawContent();
-})();
-
-/* === 1. dot-matrix wave (2D canvas, full page, behind everything) ======== */
-(() => {
-  const cv = document.getElementById('dots'), ctx = cv.getContext('2d');
-  let W = 0, H = 0;
-  const fit = () => {
-    const d = Math.min(devicePixelRatio || 1, 2);
-    W = innerWidth; H = innerHeight;
-    cv.width = W * d; cv.height = H * d; ctx.setTransform(d,0,0,d,0,0);
-  };
-  fit(); addEventListener('resize', fit);
-
-  // crest(u,t) -> height of the wave surface at horizontal position u.
-  // Above the crest is empty; below it the dots pack in and fatten with depth.
-  const crest = (u, t) => 0.74
-    + 0.045 * Math.sin(u * 2.3 + t * 0.42)
-    + 0.020 * Math.sin(u * 6.1 - t * 0.71 + 1.3)
-    + 0.011 * Math.sin(u * 13.7 + t * 1.05);
-
-  const STEP = 13, RMAX = 2.2;
-  const frame = ms => {
-    const t = ms / 1000;
-    if (cv.offsetWidth !== W || cv.offsetHeight !== H) fit();
-    ctx.clearRect(0,0,W,H);
-    ctx.fillStyle = cssVar('--text');
-    ctx.globalAlpha = 0.22;
-    for (let y = STEP/2; y < H; y += STEP) {
-      const v = y / H;
-      for (let x = STEP/2; x < W; x += STEP) {
-        const d = v - crest(x / W, t);
-        if (d < 0) continue;
-        const b = d < 0.006 ? 1 : Math.min(1, 0.32 + d * 3.2);
-        ctx.beginPath(); ctx.arc(x, y, b * RMAX, 0, 6.2832); ctx.fill();
-      }
-    }
-    ctx.globalAlpha = 1;
-    requestAnimationFrame(frame);
-  };
-  requestAnimationFrame(frame);
 })();
 
 /* === 2. content texture - the hero, drawn to an offscreen 2D canvas ====== */
@@ -204,31 +201,27 @@ function drawContent() {
   cctx.fillText('Variable faces drawn for instruments and', cx, cy + size * 1.12);
   cctx.fillText('the documents that outlive them.', cx, cy + size * 1.42);
 
-  // CTA plate - measured from the label, never guessed from the wordmark, or the
-  // type spills out of the plate at some viewport widths (it did).
-  const label = 'VIEW THE SPECIMENS';
-  const lsz  = Math.max(12, size * 0.115);
-  const ltrk = lsz * 0.16;
-  cctx.font = '600 ' + lsz + 'px ' + fam;
-  cctx.letterSpacing = '0.16em';
-  const lw = cctx.measureText(label).width - ltrk;   // Chrome tracks after the last glyph too
-  cctx.letterSpacing = '0px';
-
-  const bw = Math.round(lw + lsz * 3.4), bh = Math.round(lsz * 3.0);
-  const bx = Math.round(cx - bw / 2), by = Math.round(cy + size * 1.78);
-  cctx.fillStyle = accent;
-  if (cctx.roundRect) { cctx.beginPath(); cctx.roundRect(bx, by, bw, bh, 4); cctx.fill(); }
-  else cctx.fillRect(bx, by, bw, bh);
-
-  cctx.fillStyle = cssVar('--bg');
-  cctx.font = '600 ' + lsz + 'px ' + fam;
-  cctx.letterSpacing = '0.16em';
-  cctx.textBaseline = 'middle';
-  cctx.fillText(label, cx + ltrk * 0.5, by + bh * 0.5);
-  cctx.textBaseline = 'alphabetic';
-  cctx.letterSpacing = '0px';
+  // The CTA is NOT painted here any more - it is a real <a> over the canvas,
+  // so it can be hovered, focused, clicked and read out. All this does is line
+  // it up with the type that IS printed.
+  placeCta(cy, size);
 
   contentDirty = true;
+}
+
+/* Position the real CTA element against the same layout the texture uses, so
+   it stays locked to the printed type at every viewport size. */
+const ctaEl = document.getElementById('cta');
+let ctaRect = { x: 0, y: 0, w: 0, h: 0 };
+function placeCta(cy, size){
+  if (!ctaEl) return;
+  const top = Math.round(cy + size * 1.78);
+  ctaEl.style.top      = top + 'px';
+  ctaEl.style.fontSize = Math.max(12, size * 0.115).toFixed(2) + 'px';
+  // measured, not assumed - the label's width depends on the loaded face, and
+  // the shader needs the real box to punch the hole in the right place
+  ctaRect = { x: Math.round(innerWidth / 2 - ctaEl.offsetWidth / 2), y: top,
+              w: ctaEl.offsetWidth, h: ctaEl.offsetHeight };
 }
 
 /* === 3. cursor - damped, so the ring glides instead of snapping ========= */
@@ -397,6 +390,9 @@ uniform float uEdge;          // hex outline width, px
 uniform vec2  uLightPos;      // soft key light, css px
 uniform float uLightR;        // its falloff radius, px
 uniform float uLightGain;
+uniform vec4  uCta;           // the real button: x, y, w, h in css px
+uniform float uCtaR;          // its corner radius
+uniform float uCtaFeather;    // how far the hex fades back in around it
 uniform float uBob;           // idle bob amplitude
 uniform float uGap;           // seam width, in cell units
 uniform vec3  uTileCol;
@@ -460,13 +456,18 @@ vec4 contentAt(vec2 p){
   return texture(uContent, uv);
 }
 
+float sdRoundRect(vec2 p, vec2 h, float r){
+  vec2 q = abs(p) - (h - r);
+  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
 /* soft area-ish key light. Gaussian falloff, so there is no rim to it. */
 float lightAt(vec2 fragPx){
   float d = length(fragPx - uLightPos) / uLightR;
   return exp(-d * d * 1.15);
 }
 
-vec3 render(vec2 frag){
+vec3 render(vec2 frag, out float lineness, out float relief){
   vec2 w = frag / uCell;                     // cell units; see contentAt for the
                                              // plane that maps 1:1 to screen
   vec2 centreW = (uRes * 0.5) / uCell;
@@ -518,6 +519,7 @@ vec3 render(vec2 frag){
   // -- seam / floor --------------------------------------------------------
   if (!hit || d > hw){
     float e = smoothstep(hw, hw + 0.004, d);
+    lineness = 1.0; relief = 0.0;                 // the seam IS a lattice line
     return mix(uSeamCol, uBgCol * 0.85 + uSeamCol * 0.15, e * 0.6) * lamp;
   }
 
@@ -533,6 +535,7 @@ vec3 render(vec2 frag){
     float depth   = clamp((hitH - hitZ) / max(uLift, 0.001), 0.0, 1.0);
     vec3 wall = mix(uSeamCol * 0.45, uTileCol, 0.06 + 0.40 * facing);
     wall = mix(wall, uSeamCol * 0.45, depth * 0.55);
+    lineness = 1.0; relief = 1.0;                 // a wall is solid hex
     return wall * mix(1.0, lamp, 0.30);   // walls barely take the key light
   }
 
@@ -551,6 +554,7 @@ vec3 render(vec2 frag){
   // lattice, so the visible honeycomb line has to be its own thing.
   float edge = 1.0 - smoothstep(0.0, uEdge / uCell, hw - d);
   face = mix(face, uSeamCol, edge * 0.55);
+  lineness = max(edge * 0.55, c.a);               // outline, plus any printed ink
 
   // A raised tile should read as raised through its WALL, not through a colour
   // shift on its lid - the reference keeps every lid the same value and lets
@@ -558,16 +562,33 @@ vec3 render(vec2 frag){
   float r = clamp(hitH / max(uLift, 0.001), 0.0, 1.0);
   face += uAccent * r * 0.02 * (1.0 - c.a * 0.6);
   face *= 0.985 + 0.03 * r;
+  relief = smoothstep(0.0, 0.15, r);              // a lifted tile is solid hex
 
   return face * lamp;
 }
 
 void main(){
   vec2 frag = vec2(vUv.x, 1.0 - vUv.y) * uRes;
-  vec3 c = render(frag);          // AA comes from the supersampled backbuffer now
-  // hand the bottom of the hero over to the dot-matrix wave behind us
-  float a = 1.0 - smoothstep(0.70, 0.99, frag.y / uRes.y);
-  outColor = vec4(c * a, a);
+  float lineness = 0.0, relief = 0.0;
+  vec3 c = render(frag, lineness, relief);   // AA is from the supersampled buffer
+
+  /* Everywhere but the button the field is opaque, exactly as before. Over the
+     button the canvas keeps ONLY its hex-ness - the outlines, and any tile
+     actually lifted - and goes transparent elsewhere, so the real element
+     underneath shows through with the lattice running across it. Feathering the
+     hole lets the button's glow bleed back into the surrounding hexes. */
+  float A = 1.0;
+  vec3 src = c;
+  if (uCta.z > 0.5){
+    vec2  hs   = uCta.zw * 0.5;
+    float sd    = sdRoundRect(frag - (uCta.xy + hs), hs, uCtaR);
+    float inCta = 1.0 - smoothstep(0.0, uCtaFeather, sd);
+    float aHex  = max(lineness, relief);
+    vec3  hexCol = mix(uSeamCol, c, clamp(relief / max(aHex, 1e-3), 0.0, 1.0));
+    A   = mix(1.0, aHex, inCta);
+    src = mix(c, hexCol, inCta);
+  }
+  outColor = vec4(src * A, A);            // premultiplied
 }`;
 
 let prog, U = {}, texContent;
@@ -679,7 +700,10 @@ const CONF = {
   },
 
   lightX:  0.15, lightY: 0.08,   // soft key light, fractions of the viewport
-  lightR:  0.62, lightGain: 0.40
+  lightR:  0.62, lightGain: 0.40,
+
+  // the hole the hex field leaves for the real CTA element underneath
+  cta: { radius: 4, feather: 26 }
 };
 
 let lastMs = 0;
@@ -719,6 +743,9 @@ function frameGL(ms){
   gl.uniform2f(U.uLightPos, CONF.lightX * CW, CONF.lightY * CH);
   gl.uniform1f(U.uLightR, CONF.lightR * CW);
   gl.uniform1f(U.uLightGain, CONF.lightGain);
+  gl.uniform4f(U.uCta, ctaRect.x, ctaRect.y, ctaRect.w, ctaRect.h);
+  gl.uniform1f(U.uCtaR, CONF.cta.radius);
+  gl.uniform1f(U.uCtaFeather, CONF.cta.feather);
 
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   requestAnimationFrame(frameGL);
