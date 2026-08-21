@@ -235,6 +235,7 @@ function drawContent() {
 const pointer = {
   tx: 0, ty: 0,     // where the cursor actually is
   x: 0,  y: 0,      // where the ring currently is (chases tx/ty)
+  vx: 0, vy: 0,     // and how fast it is moving - the spring carries momentum
   press: 0,         // 0 = floor is dead flat, 1 = ring at full height
   want: 0,
   seen: false
@@ -245,7 +246,10 @@ function engage(x, y){
   // If the field is already flat the ring is invisible, so drop it straight
   // onto the cursor. Easing in from wherever the cursor was last seen would
   // sweep a ridge across the whole page on re-entry.
-  if (!pointer.seen || pointer.press < 0.06) { pointer.x = x; pointer.y = y; }
+  if (!pointer.seen || pointer.press < 0.06) {
+    pointer.x = x; pointer.y = y;
+    pointer.vx = 0; pointer.vy = 0;   // teleport must kill momentum too, or the
+  }                                   // ring gets flung on re-entry
   pointer.seen = true;
   pointer.want = 1;
 }
@@ -275,15 +279,52 @@ document.addEventListener('visibilitychange', () => {    // tab switched away
   if (document.hidden) release();
 });
 
-// frame-rate independent exponential ease: per-second rate, not per-frame
+// frame-rate independent exponential ease: per-second rate, not per-frame.
+// Still used for PRESS (fading the ring in and out), which must never overshoot.
 const ease = (a, b, rate, dt) => a + (b - a) * (1 - Math.exp(-rate * dt));
 
+/* The ring POSITION is a spring, not an ease.
+
+   An exponential ease can only ever approach its target - it has no momentum,
+   so it can never drift past the cursor, however it is tuned. Overshoot needs a
+   second-order system, so position is a damped spring and the ring carries
+   velocity: it lags while you move, and when you stop suddenly that velocity
+   carries it past the cursor before it pulls back.
+
+   CONF.follow is stated in the terms you actually judge - how far past it goes,
+   and how long it takes to settle - and the spring constants are derived. For a
+   damped spring the first overshoot fixes the damping ratio outright:
+
+     zeta  = -ln(o) / sqrt(pi^2 + ln(o)^2)        o = 0.10 -> zeta ~ 0.591
+     omega = 4 / (zeta * settle)                  (4/zeta*w is the 2% settle time)
+     k = omega^2,  c = 2 * zeta * omega
+
+   NB the overshoot is a fraction of the distance the ring had left to cover, so
+   it is naturally larger the faster you were moving - which is the "depending on
+   speed" part, and falls out of the physics rather than being special-cased. */
+function springConst(overshoot, settle){
+  const o  = Math.min(Math.max(overshoot, 1e-4), 0.95);
+  const ln = Math.log(o);
+  const z  = -ln / Math.sqrt(Math.PI * Math.PI + ln * ln);
+  const w  = 4 / Math.max(z * settle, 1e-3);
+  return { k: w * w, c: 2 * z * w };
+}
+
 function stepPointer(dt){
-  // slow, soft chase. The ring trails the cursor rather than being welded to
-  // it, which is what makes tiles look like they rise and settle rather than
-  // snap. Rates are per-second time constants, not per-frame fractions.
-  pointer.x     = ease(pointer.x,     pointer.tx,   6.5, dt);
-  pointer.y     = ease(pointer.y,     pointer.ty,   6.5, dt);
+  const { k, c } = springConst(CONF.follow.overshoot, CONF.follow.settle);
+  // Substep at a fixed ceiling. An explicit spring integrated at whatever the
+  // frame length happens to be changes its feel with frame rate, and can go
+  // unstable outright on a slow frame.
+  let t = dt;
+  while (t > 1e-6){
+    const h = Math.min(t, 1 / 240);
+    t -= h;
+    pointer.vx += (k * (pointer.tx - pointer.x) - c * pointer.vx) * h;
+    pointer.vy += (k * (pointer.ty - pointer.y) - c * pointer.vy) * h;
+    pointer.x  += pointer.vx * h;
+    pointer.y  += pointer.vy * h;
+  }
+
   pointer.press = ease(pointer.press, pointer.want, 2.6, dt);
   // an exponential only ever approaches its target, so settle the last sliver
   // and let the floor reach genuinely flat
@@ -582,6 +623,10 @@ const CONF = {
                    //   on one tile and the arc reads as a staircase, not a ridge
   hold:    0.0425, // crest
   fall:    0.12,
+
+  // how the ring chases the cursor - see the spring note above stepPointer
+  follow:  { overshoot: 0.10,   // drifts 10% past the cursor when you stop dead
+             settle:    1.0 },  // seconds to come back and rest on it
 
   lightX:  0.15, lightY: 0.08,   // soft key light, fractions of the viewport
   lightR:  0.62, lightGain: 0.40
