@@ -60,19 +60,15 @@
     background:var(--cta);color:var(--cta-ink);
     font-family:inherit;font-weight:600;letter-spacing:.16em;
     text-transform:uppercase;text-decoration:none;cursor:pointer;
-    box-shadow:0 0 0 1px var(--cta-edge),
-               0 0 20px 1px var(--cta-glow),
-               0 0 56px 6px var(--cta-glow);
-    transition:background .26s ease, transform .26s cubic-bezier(.22,.61,.36,1),
-               box-shadow .26s cubic-bezier(.22,.61,.36,1);
+    /* no box-shadow glow: the canvas is opaque right up to the button, so a
+       CSS shadow would be painted straight over. The shader draws it instead. */
+    box-shadow:0 0 0 1px var(--cta-edge);
+    transition:background .26s ease, transform .26s cubic-bezier(.22,.61,.36,1);
   }
   .cta .arr{transition:transform .26s cubic-bezier(.22,.61,.36,1)}
   .cta:hover,.cta:focus-visible{
     background:var(--cta-hot);
     transform:translateX(-50%) translateY(-2px);
-    box-shadow:0 0 0 1px var(--cta-edge),
-               0 0 28px 3px var(--cta-glow),
-               0 0 84px 14px var(--cta-glow);
   }
   .cta:focus-visible{outline:2px solid var(--cta-ink);outline-offset:3px}
   .cta:hover .arr,.cta:focus-visible .arr{transform:translateX(5px)}
@@ -212,16 +208,32 @@ function drawContent() {
 /* Position the real CTA element against the same layout the texture uses, so
    it stays locked to the printed type at every viewport size. */
 const ctaEl = document.getElementById('cta');
+const heroEl = document.querySelector('.hero');
 let ctaRect = { x: 0, y: 0, w: 0, h: 0 };
+let ctaHot = 0, ctaWant = 0;
+
 function placeCta(cy, size){
   if (!ctaEl) return;
-  const top = Math.round(cy + size * 1.78);
-  ctaEl.style.top      = top + 'px';
+  ctaEl.style.top      = Math.round(cy + size * 1.78) + 'px';
   ctaEl.style.fontSize = Math.max(12, size * 0.115).toFixed(2) + 'px';
-  // measured, not assumed - the label's width depends on the loaded face, and
-  // the shader needs the real box to punch the hole in the right place
-  ctaRect = { x: Math.round(innerWidth / 2 - ctaEl.offsetWidth / 2), y: top,
-              w: ctaEl.offsetWidth, h: ctaEl.offsetHeight };
+}
+
+/* Read the real box every frame rather than caching it. The label's width
+   depends on the loaded face, and the hover state nudges it 2px - a cached
+   rect would leave the hole misaligned with the button it is cut for. */
+function syncCtaRect(){
+  if (!ctaEl || !heroEl) return;
+  const r = ctaEl.getBoundingClientRect(), h = heroEl.getBoundingClientRect();
+  ctaRect = { x: r.left - h.left, y: r.top - h.top, w: r.width, h: r.height };
+}
+
+if (ctaEl){
+  const hot  = () => { ctaWant = 1; };
+  const cool = () => { ctaWant = 0; };
+  ctaEl.addEventListener('pointerenter', hot);
+  ctaEl.addEventListener('pointerleave', cool);
+  ctaEl.addEventListener('focus', hot);
+  ctaEl.addEventListener('blur',  cool);
 }
 
 /* === 3. cursor - damped, so the ring glides instead of snapping ========= */
@@ -392,7 +404,10 @@ uniform float uLightR;        // its falloff radius, px
 uniform float uLightGain;
 uniform vec4  uCta;           // the real button: x, y, w, h in css px
 uniform float uCtaR;          // its corner radius
-uniform float uCtaFeather;    // how far the hex fades back in around it
+uniform float uCtaFeather;    // edge softness of the hole, px
+uniform vec3  uCtaGlowCol;    // the button's glow, drawn BY THE SHADER so it
+uniform float uCtaGlowR;      //   falls on the hexes instead of being hidden
+uniform float uCtaHot;        //   behind an opaque canvas. 0..1 on hover.
 uniform float uBob;           // idle bob amplitude
 uniform float uGap;           // seam width, in cell units
 uniform vec3  uTileCol;
@@ -467,7 +482,8 @@ float lightAt(vec2 fragPx){
   return exp(-d * d * 1.15);
 }
 
-vec3 render(vec2 frag, out float lineness, out float relief){
+vec3 render(vec2 frag, out float outline){
+  outline = 0.0;
   vec2 w = frag / uCell;                     // cell units; see contentAt for the
                                              // plane that maps 1:1 to screen
   vec2 centreW = (uRes * 0.5) / uCell;
@@ -519,7 +535,7 @@ vec3 render(vec2 frag, out float lineness, out float relief){
   // -- seam / floor --------------------------------------------------------
   if (!hit || d > hw){
     float e = smoothstep(hw, hw + 0.004, d);
-    lineness = 1.0; relief = 0.0;                 // the seam IS a lattice line
+    outline = 1.0;                                // the seam IS a lattice line
     return mix(uSeamCol, uBgCol * 0.85 + uSeamCol * 0.15, e * 0.6) * lamp;
   }
 
@@ -535,7 +551,9 @@ vec3 render(vec2 frag, out float lineness, out float relief){
     float depth   = clamp((hitH - hitZ) / max(uLift, 0.001), 0.0, 1.0);
     vec3 wall = mix(uSeamCol * 0.45, uTileCol, 0.06 + 0.40 * facing);
     wall = mix(wall, uSeamCol * 0.45, depth * 0.55);
-    lineness = 1.0; relief = 1.0;                 // a wall is solid hex
+    outline = 0.0;                                // a wall is solid, not a line:
+                                                  // over the button it is hidden,
+                                                  // so ridges pass BEHIND it
     return wall * mix(1.0, lamp, 0.30);   // walls barely take the key light
   }
 
@@ -554,7 +572,7 @@ vec3 render(vec2 frag, out float lineness, out float relief){
   // lattice, so the visible honeycomb line has to be its own thing.
   float edge = 1.0 - smoothstep(0.0, uEdge / uCell, hw - d);
   face = mix(face, uSeamCol, edge * 0.55);
-  lineness = max(edge * 0.55, c.a);               // outline, plus any printed ink
+  outline = max(edge * 0.55, c.a);                // outline, plus any printed ink
 
   // A raised tile should read as raised through its WALL, not through a colour
   // shift on its lid - the reference keeps every lid the same value and lets
@@ -562,32 +580,38 @@ vec3 render(vec2 frag, out float lineness, out float relief){
   float r = clamp(hitH / max(uLift, 0.001), 0.0, 1.0);
   face += uAccent * r * 0.02 * (1.0 - c.a * 0.6);
   face *= 0.985 + 0.03 * r;
-  relief = smoothstep(0.0, 0.15, r);              // a lifted tile is solid hex
 
   return face * lamp;
 }
 
 void main(){
   vec2 frag = vec2(vUv.x, 1.0 - vUv.y) * uRes;
-  float lineness = 0.0, relief = 0.0;
-  vec3 c = render(frag, lineness, relief);   // AA is from the supersampled buffer
+  float outline = 0.0;
+  vec3 c = render(frag, outline);            // AA is from the supersampled buffer
 
-  /* Everywhere but the button the field is opaque, exactly as before. Over the
-     button the canvas keeps ONLY its hex-ness - the outlines, and any tile
-     actually lifted - and goes transparent elsewhere, so the real element
-     underneath shows through with the lattice running across it. Feathering the
-     hole lets the button's glow bleed back into the surrounding hexes. */
   float A = 1.0;
   vec3 src = c;
+
   if (uCta.z > 0.5){
-    vec2  hs   = uCta.zw * 0.5;
-    float sd    = sdRoundRect(frag - (uCta.xy + hs), hs, uCtaR);
+    vec2  hs = uCta.zw * 0.5;
+    float sd = sdRoundRect(frag - (uCta.xy + hs), hs, uCtaR);
+
+    /* The button is a PLATE ON the field, never buried by it. Inside its box the
+       canvas keeps only the etched outlines and drops every fill and wall, so a
+       passing ridge goes behind the button instead of swallowing it. Letting
+       lifted tiles stay opaque here is exactly what hid it before. */
     float inCta = 1.0 - smoothstep(0.0, uCtaFeather, sd);
-    float aHex  = max(lineness, relief);
-    vec3  hexCol = mix(uSeamCol, c, clamp(relief / max(aHex, 1e-3), 0.0, 1.0));
-    A   = mix(1.0, aHex, inCta);
-    src = mix(c, hexCol, inCta);
+    A   = mix(1.0, outline, inCta);
+    src = mix(c, uSeamCol, inCta);
+
+    /* Its glow is drawn HERE rather than as a CSS box-shadow. The canvas is
+       opaque right up to the button, so a CSS shadow would be painted over and
+       never seen; drawn in the shader it lands on the hexes, which is the whole
+       point of a glow. */
+    float g = exp(-max(sd, 0.0) / max(uCtaGlowR, 1.0));
+    src += uCtaGlowCol * g * (0.30 + 0.70 * uCtaHot) * (1.0 - inCta);
   }
+
   outColor = vec4(src * A, A);            // premultiplied
 }`;
 
@@ -648,6 +672,10 @@ function pushTheme(){
   gl.uniform3fv(U.uSeamCol, hexToRgb(cssVar('--seam')));
   gl.uniform3fv(U.uAccent,  hexToRgb(cssVar('--accent')));
   gl.uniform3fv(U.uBgCol,   hexToRgb(cssVar('--bg')));
+  const g = hexToRgb(cssVar('--cta'));
+  gl.uniform3f(U.uCtaGlowCol, g[0] * CONF.cta.glowGain,
+                              g[1] * CONF.cta.glowGain,
+                              g[2] * CONF.cta.glowGain);
 }
 
 const CONF = {
@@ -703,7 +731,9 @@ const CONF = {
   lightR:  0.62, lightGain: 0.40,
 
   // the hole the hex field leaves for the real CTA element underneath
-  cta: { radius: 4, feather: 26 }
+  // the button's plate on the field: a tight hole, and a glow the shader
+  // paints onto the surrounding hexes
+  cta: { radius: 4, feather: 1.5, glowR: 46, glowGain: 0.55 }
 };
 
 let lastMs = 0;
@@ -743,9 +773,13 @@ function frameGL(ms){
   gl.uniform2f(U.uLightPos, CONF.lightX * CW, CONF.lightY * CH);
   gl.uniform1f(U.uLightR, CONF.lightR * CW);
   gl.uniform1f(U.uLightGain, CONF.lightGain);
+  syncCtaRect();
+  ctaHot = ease(ctaHot, ctaWant, 7, dt);
   gl.uniform4f(U.uCta, ctaRect.x, ctaRect.y, ctaRect.w, ctaRect.h);
   gl.uniform1f(U.uCtaR, CONF.cta.radius);
   gl.uniform1f(U.uCtaFeather, CONF.cta.feather);
+  gl.uniform1f(U.uCtaGlowR, CONF.cta.glowR);
+  gl.uniform1f(U.uCtaHot, ctaHot);
 
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   requestAnimationFrame(frameGL);
