@@ -631,9 +631,12 @@ function pushTheme(){
 
 const CONF = {
   // Hex size is held at a constant COUNT across the viewport rather than a fixed
-  // pixel size - a screenshot pins down the ratio, never the px. The reference
-  // measured ~11 across; 6.0 is Derik's tuning up from there, not the reference.
-  across:  6.0,    // hexes across the viewport width
+  // pixel size - a screenshot pins down the ratio, never the px.
+  // NB this used to read 6.0 with cell = CW/across/2, so the number was half
+  // the real count and every hex-width figure derived from it was 2x too big.
+  // 12 with cell = CW/across is the SAME pixel size, just honestly named:
+  // the lattice pitch IS cell, so hexes across == across.
+  across:  12,     // hexes across the viewport width (flat-to-flat)
   cellMin: 74, cellMax: 300,   // must clear across-derived size or it clamps
 
   tiltDeg: 8,      // camera lean off vertical. 8 deg = 82 deg up off the floor.
@@ -650,9 +653,13 @@ const CONF = {
   ink:     0.45,   // how far up the slab the wordmark is printed
 
   // ring profile, as fractions of viewport width, measured out from the cursor
-  r0:      0.20,   // flat plateau around the cursor
-  rise:    0.06,   // NB: at across=6 this is ~0.35 of a hex, so the climb lands
-                   //   on one tile and the arc reads as a staircase, not a ridge
+  r0:      0.08,   // flat plateau around the cursor. Pulled well in from 0.20
+                   //   so the inner flank has room to start further inward.
+  rise:    0.18,   // the INNER flank. At 0.06 the whole climb fell inside 0.7 of
+                   //   one hex, so tiles jumped 0 -> 0.22 -> 0.97 between rings
+                   //   and the inner edge read as a wall. At 0.18 it spans ~2.2
+                   //   hexes and four rings share the climb. Crest position is
+                   //   unchanged: r0 + rise is still 0.26.
   hold:    0.0425, // crest
   fall:    0.12,
 
@@ -689,7 +696,7 @@ function frameGL(ms){
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, content);
     contentDirty = false;
   }
-  const cell = Math.min(CONF.cellMax, Math.max(CONF.cellMin, CW / CONF.across / 2));
+  const cell = Math.min(CONF.cellMax, Math.max(CONF.cellMin, CW / CONF.across));
   const tilt = Math.tan(CONF.tiltDeg * Math.PI / 180);
   const az   = CONF.tiltAz * Math.PI / 180;
 
