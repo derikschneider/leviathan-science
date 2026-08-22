@@ -403,7 +403,11 @@ uniform vec2  uRes;           // canvas size in css px
 uniform float uCell;          // hex circumradius in css px
 uniform float uTime;
 uniform vec2  uTiltDir;       // screen-space shear per unit of height
-uniform float uPersp;         // extra outward shear away from centre
+uniform float uFan;           // fov: outward lean per unit height at the screen edge
+uniform float uFar0;          // px - where the far field starts rising
+uniform float uFar1;          // px - where it reaches full far level
+uniform float uFarH;          // far-field height, as a fraction of uLift
+uniform float uFarNoise;      // per-tile height variation of the far field, 0..1
 uniform float uLift;          // crest height of the ring, in cell units
 uniform vec2  uPointer;       // damped cursor, css px, y down
 uniform float uR0;            // radius of the flat plateau around the cursor, px
@@ -447,22 +451,45 @@ vec2 hexCentre(vec2 p){
 /* quintic smootherstep - zero 1st AND 2nd derivative at both ends. Plain
    smoothstep still has a curvature kink at the joins, which reads as a faint
    crease running round the ring; this does not. */
+float hash21(vec2 p){
+  vec3 q = fract(vec3(p.xyx) * 0.1031);
+  q += dot(q, q.yzx + 33.33);
+  return fract((q.x + q.y) * q.z);
+}
+
 float smoother(float e0, float e1, float x){
   float t = clamp((x - e0) / max(e1 - e0, 1e-5), 0.0, 1.0);
   return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
 }
 
-/* The ring profile, as a function of distance from the cursor:
+/* The terrain, as a function of distance from the cursor:
 
-     0 ......... uR0 ..... +uRise ..... +uHold ..... +uFall .........
-     |<- flat ->|<- up ->|<- crest ->|<-- down -->|<- flat floor ->|
+     0 ......... uR0 ..... +uRise ..... +uHold ..... +uFall ... uFar0 .. uFar1 ...
+     |<- flat ->|<- up ->|<- crest ->|<-- down -->|<-  dip  ->|<- rise to far ->|
 
-   Flat under the cursor, a hill around it, floor again outside. */
-float ringAt(vec2 centre){
+   Flat under the cursor, the ridge around it, a dip - and beyond that the FAR
+   FIELD: tiles standing at uFarH with stable per-tile height noise. This far
+   relief is what makes the camera tilt readable AT ALL times: an orthographic
+   shear displaces only things with height, so on a dead-flat floor every
+   degree of tilt is literally invisible - which is how the scene kept reading
+   as untilted no matter how the tilt dial moved. The reference is never flat
+   at its periphery either.
+
+   With no cursor (uPress = 0) the WHOLE floor idles at the far level, and the
+   arriving cursor presses the plateau + ridge shape into it. */
+float terrainAt(vec2 centre){
   float d  = length(centre * uCell - uPointer);
   float up = smoother(uR0, uR0 + uRise, d);
   float dn = 1.0 - smoother(uR0 + uRise + uHold, uR0 + uRise + uHold + uFall, d);
-  return min(up, dn) * uPress;
+  float ridge = min(up, dn);
+
+  // stable per-tile noise: idle relief must not animate, or printed content
+  // shatters the way the random-phase bob once did
+  float n    = hash21(centre * 3.71 + 5.3) * 2.0 - 1.0;
+  float farL = uFarH * (1.0 + uFarNoise * n);
+  float far  = smoother(uFar0, uFar1, d) * farL;
+
+  return mix(farL, max(ridge, far), uPress);
 }
 
 float sdRoundRect(vec2 p, vec2 hs, float r){
@@ -476,15 +503,15 @@ float sdRoundRect(vec2 p, vec2 hs, float r){
    its top, and its side walls are what read as the reference's offset
    "shadow". cta returns that slab's height (0 elsewhere) so the caller can
    tell whose surface the ray hit. */
-float heightAt(vec2 p, out vec2 centre, out float ring, out float cta){
+float heightAt(vec2 p, out vec2 centre, out float terr, out float cta){
   centre = hexCentre(p);
-  ring = ringAt(centre);
+  terr = terrainAt(centre);
   // Breathing is a smooth wave ACROSS the lattice, not a random phase per cell.
   // Random phases make every neighbour a different height, which shatters the
   // printed wordmark into per-tile shards.
   float bob = uBob * sin(uTime * 0.55 + centre.x * 0.42 + centre.y * 0.31)
                    * cos(uTime * 0.37 - centre.x * 0.19 + centre.y * 0.27);
-  float hexH = (uLift + bob) * ring;
+  float hexH = (uLift + bob) * terr;
 
   cta = 0.0;
   if (uCtaHot > 0.001 && uCta.z > 0.5){
@@ -518,8 +545,13 @@ vec3 render(vec2 frag){
      lean OUTWARD on screen - and you see the wall each column turns toward the
      centre. With the sign the other way, every column showed its far, outer
      wall instead: rays converging as they descend, a camera that cannot exist.
-     That inverted look is exactly what got reported. */
-  vec2 shear = uTiltDir - (w - centreW) * uPersp;
+
+     fanN is the screen position normalized to -1..1 at the side edges, so uFan
+     is a true fov dial in px (see CONF.fanPx) - it no longer weakens when the
+     tilt or the hex size changes, which is what the old per-cell persp term
+     quietly did. */
+  vec2 fanN  = (w - centreW) * uCell / (uRes * 0.5);
+  vec2 shear = uTiltDir - fanN * uFan;
 
   float maxH   = max(uLift, uCtaLift * uCtaHot) + uBob + 0.02;
   float floorZ = -0.05;
@@ -598,7 +630,10 @@ vec3 render(vec2 frag){
   // it ate the T of LEVIATHAN. Sinking the ink plane decouples "how solid the
   // tiles look" from "how much the mark shatters"; they are otherwise the same
   // number and cannot be traded off against each other.
-  vec4 c = contentAt(w + shear * hitZ * uInk);
+  // the ink plane shears with the TILT only, never the fan: fanning the print
+  // smears glyph ends sideways at the screen edges, and type integrity is not
+  // for sale to a camera dial
+  vec4 c = contentAt(w + uTiltDir * hitZ * uInk);
   vec3 face = mix(uTileCol, c.rgb, c.a);
 
   // hex outline. This is a DRAWN stroke, not the physical gap: at the 0.25px
@@ -704,19 +739,21 @@ const CONF = {
   across:  12,     // hexes across the viewport width (flat-to-flat)
   cellMin: 74, cellMax: 300,   // must clear across-derived size or it clamps
 
-  tiltDeg: 12,     // camera lean off vertical
+  tiltDeg: 14,     // camera lean off vertical - sets which way walls hang and
+                   //   the print shear; wall HEIGHT stays pinned by liftPx
   tiltAz:  90,     // which way it leans: 90 = down the screen
-  persp:   0.038,  // THE perspective dial: how hard column tops fan outward
-                   //   from the screen centre. The shader applies the sign -
-                   //   see the note at `shear` about which walls you must see.
+  fanPx:   85,     // THE fov dial: how many px a full-height column at the
+                   //   screen's side edge leans outward beyond a centre one.
+                   //   Stated in px so tilt and hex-size changes cannot quietly
+                   //   weaken it - the old persp term did exactly that.
 
   // Elevation is stated as the SIDE WALL HEIGHT IN PX, because that is what
   // you actually see and judge. Stated in cell units instead, it would silently
   // change every time the hex size does - screen wall = lift * tan(tilt) * cell.
   liftPx:  26,     // was 33px at the previous size
   bob:     0.020,
-  gapPx:   0.065,  // physical separation between tiles
-  edgePx:  0.27,   // drawn honeycomb outline - see the note in the shader
+  gapPx:   0.13,   // physical separation between tiles
+  edgePx:  0.54,   // drawn honeycomb outline - see the note in the shader
   ink:     0.45,   // how far up the slab the wordmark is printed
 
   // ring profile, as fractions of viewport width, measured out from the cursor
@@ -725,6 +762,11 @@ const CONF = {
                    //   0.06 wall era, a touch sharper than 0.18 - deliberate.
   hold:    0.05,   // crest
   fall:    0.13,
+
+  // the FAR FIELD: beyond the dip the tiles stand back up to `level` x liftPx
+  // with stable per-tile noise. This is what keeps the tilt readable at rest -
+  // orthographic shear shows nothing on a dead-flat floor. See terrainAt.
+  far: { start: 0.46, end: 0.72, level: 0.52, noise: 0.14 },
 
   // How the ring chases the cursor - see the long note above stepPointer.
   // These are three genuinely independent dials; they were one spring and
@@ -773,7 +815,11 @@ function frameGL(ms){
   gl.uniform1f(U.uCell, cell);
   gl.uniform1f(U.uTime, ms / 1000);
   gl.uniform2f(U.uTiltDir, tilt * Math.cos(az), tilt * Math.sin(az));
-  gl.uniform1f(U.uPersp, CONF.persp);
+  gl.uniform1f(U.uFan, CONF.fanPx * tilt / CONF.liftPx);
+  gl.uniform1f(U.uFar0, CONF.far.start * CW);
+  gl.uniform1f(U.uFar1, CONF.far.end * CW);
+  gl.uniform1f(U.uFarH, CONF.far.level);
+  gl.uniform1f(U.uFarNoise, CONF.far.noise);
   gl.uniform1f(U.uLift, CONF.liftPx / Math.max(tilt * cell, 1e-3));
   gl.uniform2f(U.uPointer, pointer.x, pointer.y);
   gl.uniform1f(U.uR0,   CONF.r0   * CW);
