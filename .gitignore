@@ -12,6 +12,14 @@ dist
 dist-ssr
 *.local
 
+# Secrets and machine-local agent overrides
+.env
+.env.*
+!.env.example
+.claude/settings.local.json
+.codex/*.local.toml
+.agents/.local/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
